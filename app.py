@@ -13,6 +13,7 @@ import streamlit as st
 import os
 import uuid
 import time
+import tempfile
 from core.database import SessionLocal, Subject, Document as DBDocument, Flashcard, ContentChunk, Topic, Subtopic, Base, engine
 from core.config import settings
 from workflows.phase1_ingestion import phase1_graph
@@ -150,6 +151,28 @@ def delete_topic_data(topic_id: int, document_id: str):
     finally:
         db.close()
 
+def _get_flashcard_source_attribution(db, fc) -> str:
+    """Return a short plain-text source attribution string for the Learner view."""
+    try:
+        chunk = db.query(ContentChunk).filter(ContentChunk.id == fc.chunk_id).first() if fc.chunk_id else None
+        if chunk and chunk.source_type:
+            if chunk.source_type == "web" and chunk.source_url:
+                from urllib.parse import urlparse
+                domain = urlparse(chunk.source_url).netloc.replace("www.", "")
+                return f"🌐 {domain}"
+            elif chunk.source_type == "image":
+                if chunk.document_id:
+                    doc = db.query(DBDocument).filter(DBDocument.id == chunk.document_id).first()
+                    return f"🖼️ {doc.filename}" if doc else "🖼️ image"
+            else:
+                if chunk.document_id:
+                    doc = db.query(DBDocument).filter(DBDocument.id == chunk.document_id).first()
+                    return f"📄 {doc.filename}" if doc else "📄 document"
+    except Exception:
+        pass
+    return ""
+
+
 @st.fragment
 def render_flashcard_list(sub_id, status="approved"):
     db = SessionLocal()
@@ -161,6 +184,11 @@ def render_flashcard_list(sub_id, status="approved"):
 
         for fc in fcs:
             if status == "approved":
+                source_attr = _get_flashcard_source_attribution(db, fc)
+                source_html = (
+                    f"<div style='margin-top:8px; font-size:0.78rem; color:#8b949e;'>Source: {source_attr}</div>"
+                    if source_attr else ""
+                )
                 st.markdown(f"""
                 <div class='stCard'>
                     <strong>Q: {fc.question}</strong>
@@ -168,6 +196,7 @@ def render_flashcard_list(sub_id, status="approved"):
                     <details style='cursor: pointer;'>
                         <summary style='color: #58a6ff;'>Show Answer</summary>
                         <p style='margin-top: 10px;'>{fc.answer}</p>
+                        {source_html}
                     </details>
                 </div>
                 """, unsafe_allow_html=True)
@@ -265,6 +294,328 @@ def render_dashboard():
     finally:
         db.close()
 
+def _render_upload_tab(db, subject_id: int, subject_name: str):
+    """Tab 1: existing PDF / Image upload flow — completely unchanged in behaviour."""
+    with st.expander("📥 Click to Upload PDF or Image", expanded=True):
+        uploaded_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "jpeg"])
+        if uploaded_file:
+            if uploaded_file.size > 50 * 1024 * 1024:
+                st.error("File exceeds the 50MB limit (50MB max).")
+                uploaded_file = None
+            else:
+                st.success(f"File selected: {uploaded_file.name}")
+        if uploaded_file and st.button("🚀 Process & Generate Hierarchy"):
+            doc_id = str(uuid.uuid4())
+            safe_filename = "".join(c for c in uploaded_file.name if c.isalnum() or c in " ._-").strip()
+            os.makedirs("temp_uploads", exist_ok=True)
+            file_path = os.path.join("temp_uploads", f"{doc_id}_{safe_filename}")
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            progress_bar = st.progress(0, text="Initializing...")
+
+            state = {
+                "file_path": file_path,
+                "doc_id": doc_id,
+                "subject_id": subject_id,
+                "chunks": [],
+                "hierarchy": [],
+                "doc_summary": "",
+                "current_chunk_index": 0,
+                "generated_flashcards": [],
+                "status_message": "Starting ingestion..."
+            }
+
+            try:
+                sync_limit = 5
+                processed_count = 0
+
+                stream = phase1_graph.stream(state)
+
+                for event in stream:
+                    node_name = list(event.keys())[0]
+                    state.update(event[node_name])
+
+                    if node_name == "ingest":
+                        progress_bar.progress(10, text="Ingested. Analyzing structure...")
+                    elif node_name == "curate":
+                        progress_bar.progress(20, text="Hierarchy extracted. Starting Q&A generation...")
+                    if node_name == "generate":
+                        processed_count += 1
+                        msg = state.get("status_message", "Generating...")
+                        p = 20 + int((processed_count / min(len(state["chunks"]), sync_limit)) * 70)
+                        progress_bar.progress(min(p, 90), text=msg)
+
+                    if node_name == "increment" and processed_count >= sync_limit:
+                        break
+
+                if processed_count < len(state["chunks"]):
+                    from core.background import start_background_task
+                    start_background_task(state, doc_id, filename=uploaded_file.name)
+                    st.toast(f"Initial {processed_count} cards for '{uploaded_file.name}' ready! Rest processing in background.")
+
+                progress_bar.progress(100, text="Initial Processing Complete!")
+                st.success(f"Successfully started '{uploaded_file.name}'!")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Processing Error: {e}")
+            finally:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+
+
+def _render_web_research_tab(subject_id: int, subject_name: str):
+    """Tab 2: Web Research — topic input, safety check, and pipeline launch."""
+
+    st.markdown("#### Topic Input")
+
+    input_mode = st.radio(
+        "How would you like to provide topics?",
+        ["✏️ Type topics", "📄 Upload topic file"],
+        horizontal=True,
+        key="web_input_mode",
+    )
+
+    raw_topics: list = []
+
+    if input_mode == "✏️ Type topics":
+        topic_text = st.text_area(
+            "Enter topics (one per line, or separated by commas)",
+            height=150,
+            key="web_topic_text",
+            placeholder="e.g.\nBinary Search Trees\nGraph Traversal Algorithms\nDynamic Programming",
+        )
+        if st.button("Parse Topics", key="btn_parse_text"):
+            if topic_text.strip():
+                with st.spinner("Parsing topics..."):
+                    from agents.topic_parser import TopicParserAgent
+                    parser = TopicParserAgent()
+                    raw_topics = parser.parse_topics_from_text(topic_text)
+                st.session_state[f"web_parsed_topics_{subject_id}"] = raw_topics
+            else:
+                st.warning("Please enter some topics first.")
+
+    else:  # Upload topic file
+        topic_file = st.file_uploader(
+            "Upload .txt, .pdf, or .docx",
+            type=["txt", "pdf", "docx"],
+            key="web_topic_file",
+        )
+        if topic_file and st.button("Parse Topics from File", key="btn_parse_file"):
+            suffix = os.path.splitext(topic_file.name)[1].lstrip(".")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{suffix}") as tmp:
+                tmp.write(topic_file.getbuffer())
+                tmp_path = tmp.name
+            try:
+                with st.spinner("Extracting and parsing topics..."):
+                    from agents.topic_parser import TopicParserAgent
+                    parser = TopicParserAgent()
+                    raw_topics = parser.parse_topics_from_file(tmp_path, suffix)
+                st.session_state[f"web_parsed_topics_{subject_id}"] = raw_topics
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+    # --- Parsed topics preview with per-topic removal ---
+    topics_key = f"web_parsed_topics_{subject_id}"
+    if topics_key not in st.session_state:
+        st.session_state[topics_key] = []
+
+    parsed_topics: list = st.session_state[topics_key]
+
+    if parsed_topics:
+        with st.expander(f"📋 Topics identified ({len(parsed_topics)}) — click to review", expanded=True):
+            to_remove = []
+            for i, topic in enumerate(parsed_topics):
+                col_t, col_x = st.columns([0.9, 0.1])
+                col_t.markdown(f"- {topic}")
+                if col_x.button("✕", key=f"rm_topic_{i}", help=f"Remove '{topic}'"):
+                    to_remove.append(i)
+            if to_remove:
+                st.session_state[topics_key] = [
+                    t for j, t in enumerate(parsed_topics) if j not in to_remove
+                ]
+                st.rerun()
+
+    # --- Safety status indicator ---
+    st.markdown("---")
+    st.markdown("#### Safety Check")
+
+    safety_key = f"safety_{subject_id}"
+    if safety_key not in st.session_state:
+        st.session_state[safety_key] = None  # None = not yet checked
+
+    if st.button("Run Safety Check", key="btn_safety_check"):
+        with st.spinner("Checking subject safety..."):
+            from agents.safety import SafetyAgent
+            agent = SafetyAgent()
+            result = agent.check_subject_safety(subject_name)
+            st.session_state[safety_key] = result
+
+    safety_result = st.session_state.get(safety_key)
+    # Require an explicit safety check — default to blocked until checked
+    subject_is_safe = safety_result.is_safe if safety_result is not None else False
+
+    if safety_result is None:
+        st.info("Run the safety check above before starting research.")
+    elif safety_result.is_safe:
+        st.success(f"Subject '{subject_name}' passed safety check.")
+    else:
+        st.error(f"Subject blocked: {safety_result.reason}")
+
+    # --- Start Web Research button ---
+    st.markdown("---")
+    st.markdown("#### Start Research")
+
+    topics_ready = bool(st.session_state.get(topics_key))
+    button_disabled = not topics_ready or not subject_is_safe
+
+    if not topics_ready:
+        st.info("Parse topics above before starting research.")
+
+    if st.button(
+        "🔍 Start Web Research",
+        key="btn_start_web_research",
+        disabled=button_disabled,
+        type="primary",
+    ):
+        final_topics = list(st.session_state[topics_key])
+        _run_web_research(subject_id=subject_id, subject_name=subject_name, topics=final_topics)
+
+
+def _run_web_research(subject_id: int, subject_name: str, topics: list):
+    """Execute the Phase 2 pipeline: first 2 topics sync with progress bar, rest in background."""
+    import uuid as _uuid
+    from workflows.phase2_web_ingestion import phase2_graph
+
+    SYNC_TOPIC_LIMIT = 2
+    sync_topics = topics[:SYNC_TOPIC_LIMIT]
+    bg_topics = topics[SYNC_TOPIC_LIMIT:]
+    total_topics = len(topics)
+
+    # --- Progress UI ---
+    st.markdown("#### Progress")
+    progress_bar = st.progress(0, text=f"Starting — 0 / {total_topics} topics")
+    status_line = st.empty()
+
+    topics_done = [0]       # mutable counter accessible inside closure
+    docs_found = [0]
+    flashcards_done = [0]
+
+    def update_status(msg: str):
+        status_line.markdown(msg)
+
+    update_status(f"Running safety check for '{subject_name}'...")
+
+    initial_state = {
+        "subject_id": subject_id,
+        "subject_name": subject_name,
+        "topics": sync_topics,
+        "web_documents": [],
+        "current_doc_index": 0,
+        "doc_id": "",
+        "full_text": "",
+        "chunks": [],
+        "hierarchy": [],
+        "doc_summary": "",
+        "current_chunk_index": 0,
+        "generated_flashcards": [],
+        "status_message": "",
+        "safety_blocked": False,
+        "safety_reason": "",
+        "processed_urls": [],
+        "status_callback": update_status,
+        "stop_event": None,
+    }
+
+    final_state = initial_state.copy()
+
+    try:
+        for event in phase2_graph.stream(initial_state):
+            node_name = list(event.keys())[0]
+            node_data = event[node_name]
+            final_state.update(node_data)
+
+            # Update progress bar based on node milestones
+            if node_name == "safety_check":
+                progress_bar.progress(5, text=f"Safety check passed — researching {len(sync_topics)} topic(s)...")
+
+            elif node_name == "research":
+                web_docs = final_state.get("web_documents") or []
+                docs_found[0] = len(web_docs)
+                progress_bar.progress(
+                    20,
+                    text=f"Research complete — {docs_found[0]} page(s) found for {len(sync_topics)} topic(s)",
+                )
+
+            elif node_name == "ingest_web_document":
+                doc_idx = final_state.get("current_doc_index", 0)
+                total_docs = max(docs_found[0], 1)
+                pct = 20 + int((doc_idx / total_docs) * 60)
+                progress_bar.progress(
+                    min(pct, 80),
+                    text=f"Ingesting page {doc_idx + 1} / {total_docs} · Topic {min(doc_idx + 1, len(sync_topics))} / {total_topics}",
+                )
+
+            elif node_name == "generate":
+                all_fc = final_state.get("generated_flashcards") or []
+                flashcards_done[0] = sum(1 for f in all_fc if f.get("status") == "success")
+                update_status(
+                    final_state.get("status_message") or f"Generating flashcards... ({flashcards_done[0]} so far)"
+                )
+
+            elif node_name == "next_document":
+                topics_done[0] = final_state.get("current_doc_index", 0)
+
+    except Exception as exc:
+        st.error(f"Web research error: {exc}")
+        return
+
+    # --- Safety blocked ---
+    if final_state.get("safety_blocked"):
+        progress_bar.empty()
+        st.error(f"Research blocked by safety guardrail: {final_state.get('safety_reason')}")
+        return
+
+    progress_bar.progress(100, text=f"Initial {len(sync_topics)} topic(s) complete!")
+    update_status(f"Done. {flashcards_done[0]} flashcard(s) generated from initial topics.")
+
+    # --- Results summary for sync phase ---
+    processed_urls = final_state.get("processed_urls") or []
+    web_docs_all = final_state.get("web_documents") or []
+    successful_cards = flashcards_done[0]
+
+    with st.expander(f"Results — {len(sync_topics)} topic(s) processed", expanded=True):
+        st.markdown(f"**Pages ingested:** {len(processed_urls)}")
+        st.markdown(f"**Flashcards generated:** {successful_cards}")
+        if processed_urls:
+            st.markdown("**Sources used:**")
+            for url in processed_urls:
+                doc_info = next((d for d in web_docs_all if d.get("url") == url), {})
+                title = doc_info.get("title", url)
+                domain = doc_info.get("domain", "")
+                st.markdown(f"  - [{title}]({url}) — {domain}")
+
+    # --- Hand off remaining topics to background ---
+    if bg_topics:
+        from core.background import start_web_background_task
+        task_id = f"web_{subject_id}_{_uuid.uuid4().hex[:8]}"
+        start_web_background_task(bg_topics, subject_id, subject_name, task_id)
+        st.toast(
+            f"Initial {len(sync_topics)} topic(s) ready! "
+            f"Remaining {len(bg_topics)} topic(s) processing in background.",
+            icon="🔍",
+        )
+    else:
+        st.success("All topics processed!")
+
+    # Clear parsed topics for this subject after launch
+    st.session_state[f"web_parsed_topics_{subject_id}"] = []
+    time.sleep(1)
+    st.rerun()
+
+
 def render_study_materials():
     st.header("📚 Study Material Ingestion")
     db = SessionLocal()
@@ -322,79 +673,21 @@ def render_study_materials():
 
         st.divider()
 
-        # 2. Upload
+        # 2. Upload / Web Research tabs
         if st.session_state.ingest_subject_id:
             subject_id = st.session_state.ingest_subject_id
-            st.subheader(f"2. Upload Artifacts to '{db.query(Subject).get(subject_id).name}'")
+            current_subject = db.get(Subject, subject_id)
+            subject_name = current_subject.name if current_subject else ""
+            st.subheader(f"2. Add Content to '{subject_name}'")
 
-            with st.expander("📥 Click to Upload PDF or Image", expanded=True):
-                uploaded_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "jpeg"])
-                if uploaded_file:
-                    if uploaded_file.size > 50 * 1024 * 1024:
-                        st.error("File exceeds the 50MB limit (50MB max).")
-                        uploaded_file = None
-                    else:
-                        st.success(f"File selected: {uploaded_file.name}")
-                if uploaded_file and st.button("🚀 Process & Generate Hierarchy"):
-                    doc_id = str(uuid.uuid4())
-                    safe_filename = "".join(c for c in uploaded_file.name if c.isalnum() or c in " ._-").strip()
-                    os.makedirs("temp_uploads", exist_ok=True)
-                    file_path = os.path.join("temp_uploads", f"{doc_id}_{safe_filename}")
-                    with open(file_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
+            tab_upload, tab_web = st.tabs(["📄 Upload Document", "🌐 Web Research"])
 
-                    progress_bar = st.progress(0, text="Initializing...")
+            with tab_upload:
+                _render_upload_tab(db, subject_id, subject_name)
 
-                    state = {
-                        "file_path": file_path,
-                        "doc_id": doc_id,
-                        "subject_id": subject_id,
-                        "chunks": [],
-                        "hierarchy": [],
-                        "doc_summary": "",
-                        "current_chunk_index": 0,
-                        "generated_flashcards": [],
-                        "status_message": "Starting ingestion..."
-                    }
+            with tab_web:
+                _render_web_research_tab(subject_id, subject_name)
 
-                    try:
-                        # 1. Sync Phase: Ingest, Curate, and Initial Burst
-                        sync_limit = 5 # Reduced for speed in demo
-                        processed_count = 0
-
-                        stream = phase1_graph.stream(state)
-
-                        for event in stream:
-                            node_name = list(event.keys())[0]
-                            state.update(event[node_name])
-
-                            if node_name == "ingest":
-                                progress_bar.progress(10, text="Ingested. Analyzing structure...")
-                            elif node_name == "curate":
-                                progress_bar.progress(20, text="Hierarchy extracted. Starting Q&A generation...")
-                            if node_name == "generate":
-                                processed_count += 1
-                                msg = state.get("status_message", "Generating...")
-                                p = 20 + int((processed_count / min(len(state["chunks"]), sync_limit)) * 70)
-                                progress_bar.progress(min(p, 90), text=msg)
-
-                            if node_name == "increment" and processed_count >= sync_limit:
-                                break
-
-                        if processed_count < len(state["chunks"]):
-                            from core.background import start_background_task
-                            start_background_task(state, doc_id, filename=uploaded_file.name)
-                            st.toast(f"Initial {processed_count} cards for '{uploaded_file.name}' ready! Rest processing in background.")
-
-                        progress_bar.progress(100, text="Initial Processing Complete!")
-                        st.success(f"Successfully started '{uploaded_file.name}'!")
-                        time.sleep(1)
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Processing Error: {e}")
-                    finally:
-                        if os.path.exists(file_path):
-                            os.remove(file_path)
         else:
             st.warning("Please select or create a subject above before uploading artifacts.")
 
@@ -407,38 +700,49 @@ def render_study_materials():
         st.divider()
         st.subheader("⚙️ Active Background Tasks")
         for d_id, task in list(background_tasks.items()):
-            # Use filename if available, else doc_id
-            display_name = task.get("filename", d_id[:8])
-            
+            is_web = task.get("is_web", False)
+            display_name = task.get("display_name") or task.get("filename") or d_id[:8]
+
             with st.container(border=True):
                 col_t, col_b = st.columns([0.85, 0.15])
-                
+
                 if task["status"] == "processing":
-                    prog = task['progress']
-                    total = task['total']
-                    percent = (prog / total) if total > 0 else 0
-                    
-                    col_t.markdown(f"**⏳ Processing: {display_name}**")
-                    col_t.progress(percent, text=f"{prog}/{total} chunks generated")
-                    
+                    if is_web:
+                        curr = task.get("pages_current", 0)
+                        total = task.get("pages_total", 1)
+                        fc = task.get("flashcards_count", 0)
+                        percent = curr / total if total > 0 else 0
+                        col_t.markdown(f"**🌐 Researching: {display_name}**")
+                        col_t.progress(
+                            percent,
+                            text=f"Page {curr} / {total} · {fc} flashcard(s) generated",
+                        )
+                    else:
+                        prog = task.get("progress", 0)
+                        total = task.get("total", 1)
+                        percent = prog / total if total > 0 else 0
+                        col_t.markdown(f"**⏳ Processing: {display_name}**")
+                        col_t.progress(percent, text=f"{prog}/{total} chunks generated")
+
                     if col_b.button("⏹️ Stop", key=f"stop_{d_id}"):
                         stop_background_task(d_id)
                         st.rerun()
-                
+
                 elif task["status"] == "completed":
-                    col_t.success(f"✅ **Completed**: {display_name}")
+                    icon = "🌐" if is_web else "✅"
+                    col_t.success(f"{icon} **Completed**: {display_name}")
                     if col_b.button("✖ Clear", key=f"clear_{d_id}"):
                         del background_tasks[d_id]
                         st.rerun()
-                
+
                 elif task["status"] == "stopped":
                     col_t.warning(f"⏹️ **Stopped**: {display_name}")
                     if col_b.button("✖ Clear", key=f"clear_{d_id}"):
                         del background_tasks[d_id]
                         st.rerun()
-                
+
                 elif task["status"] == "failed":
-                    col_t.error(f"❌ **Failed**: {display_name} - {task.get('error', 'Unknown Error')}")
+                    col_t.error(f"❌ **Failed**: {display_name} — {task.get('error', 'Unknown Error')}")
                     if col_b.button("✖ Clear", key=f"clear_{d_id}"):
                         del background_tasks[d_id]
                         st.rerun()
@@ -541,7 +845,46 @@ def render_mentor_review():
     finally:
         db.close()
 
+def _get_flashcard_source_badge(db, fc) -> str:
+    """Return an HTML source badge string for a flashcard.
+
+    Looks up the source_type and source_url from ContentChunk -> Document.
+    Falls back gracefully if the chunk or document record is missing.
+    """
+    try:
+        chunk = db.query(ContentChunk).filter(ContentChunk.id == fc.chunk_id).first() if fc.chunk_id else None
+        if chunk and chunk.source_type:
+            if chunk.source_type == "web" and chunk.source_url:
+                from urllib.parse import urlparse
+                domain = urlparse(chunk.source_url).netloc.replace("www.", "")
+                return (
+                    f"<a href='{chunk.source_url}' target='_blank' "
+                    f"style='font-size:0.78rem; color:#58a6ff; text-decoration:none;'>"
+                    f"🌐 {domain}</a>"
+                )
+            elif chunk.source_type == "image":
+                # Get filename from Document
+                if chunk.document_id:
+                    doc = db.query(DBDocument).filter(DBDocument.id == chunk.document_id).first()
+                    fname = doc.filename if doc else "image"
+                    return f"<span style='font-size:0.78rem; color:#8b949e;'>🖼️ {fname}</span>"
+            else:
+                # pdf or text — get filename from Document
+                if chunk.document_id:
+                    doc = db.query(DBDocument).filter(DBDocument.id == chunk.document_id).first()
+                    fname = doc.filename if doc else "document"
+                    return f"<span style='font-size:0.78rem; color:#8b949e;'>📄 {fname}</span>"
+    except Exception:
+        pass
+    return ""
+
+
 def render_flashcard_review_card(db, fc, current_status):
+    source_badge = _get_flashcard_source_badge(db, fc)
+    source_html = (
+        f"<div style='margin-top:6px;'>{source_badge}</div>"
+        if source_badge else ""
+    )
     st.markdown(f"""
     <div class='stCard'>
         <div style='display:flex; justify-content:space-between;'>
@@ -555,6 +898,7 @@ def render_flashcard_review_card(db, fc, current_status):
         <div style='font-size: 0.85rem; color: #8b949e;'>
             <em>Critic Feedback: {fc.critic_feedback}</em>
         </div>
+        {source_html}
     </div>
     """, unsafe_allow_html=True)
     

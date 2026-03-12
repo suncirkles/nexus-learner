@@ -7,7 +7,7 @@ Subtopics, and Flashcards. Uses SQLite for the MVP.
 """
 
 from contextlib import contextmanager
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, ForeignKey, text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime, timezone
 from .config import settings
@@ -53,12 +53,14 @@ class Subject(Base):
 class Document(Base):
     """Tracks unique uploaded files to prevent duplicates."""
     __tablename__ = "documents"
-    
+
     id = Column(String, primary_key=True, index=True)  # UUID
     subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
     filename = Column(String)
     title = Column(String, nullable=True)
     content_hash = Column(String, unique=True, index=True)
+    source_type = Column(String(20), nullable=False, default="pdf")   # "pdf" | "image" | "web" | "text"
+    source_url = Column(String(2048), nullable=True)                   # URL if source_type == "web"
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
@@ -69,10 +71,12 @@ class Document(Base):
 class ContentChunk(Base):
     """Individual text chunks extracted from a document."""
     __tablename__ = "content_chunks"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     document_id = Column(String, ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     text = Column(Text)
+    source_type = Column(String(20), nullable=False, default="pdf")   # "pdf" | "image" | "web" | "text"
+    source_url = Column(String(2048), nullable=True)                   # URL if source_type == "web"
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
@@ -136,6 +140,35 @@ class Flashcard(Base):
 
 # Create tables (no-op if they already exist)
 Base.metadata.create_all(bind=engine)
+
+
+def _run_migrations():
+    """Apply any backward-compatible schema migrations at startup.
+
+    Uses PRAGMA table_info to detect missing columns and issues ALTER TABLE
+    statements for each one.  Existing rows receive the column default
+    (SQLite sets them to NULL; the ORM default of "pdf" is only applied on
+    new inserts via SQLAlchemy).
+    """
+    migrations = [
+        # (table_name, column_name, column_ddl)
+        ("documents",      "source_type", "VARCHAR(20) NOT NULL DEFAULT 'pdf'"),
+        ("documents",      "source_url",  "VARCHAR(2048)"),
+        ("content_chunks", "source_type", "VARCHAR(20) NOT NULL DEFAULT 'pdf'"),
+        ("content_chunks", "source_url",  "VARCHAR(2048)"),
+    ]
+
+    with engine.connect() as conn:
+        for table, column, col_ddl in migrations:
+            # PRAGMA table_info returns one row per column
+            rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+            existing_columns = {row[1] for row in rows}  # row[1] is the column name
+            if column not in existing_columns:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_ddl}"))
+                conn.commit()
+
+
+_run_migrations()
 
 
 def get_db():

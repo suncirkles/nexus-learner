@@ -85,22 +85,35 @@ To create an AI-driven "recursive" learning environment where the system doesn't
 
 ---
 
+### Epic 8: Web Research & Automated Ingestion (Phase 2)
+
+| ID | User Story | Status |
+| :--- | :--- | :---: |
+| 8.1 | Provide a list of topics (typed or uploaded) for automated research. | ✅ |
+| 8.2 | Run safety checks on subjects to ensure ethical and appropriate content. | ✅ |
+| 8.3 | Search trusted educational sources (Wikipedia, MDN, Python Docs, etc.). | ✅ |
+| 8.4 | Scrape and clean web content for flashcard generation. | ✅ |
+| 8.5 | Prevent duplicate ingestion of web pages via content hashing. | ✅ |
+| 8.6 | Display source attribution (domain/URL) in review and learner views. | ✅ |
+
+---
+
 ## 5. Future Phase Requirements
 
-### Phase 2: Spaced Repetition & Confidence Tracking
+### Phase 3: Spaced Repetition & Confidence Tracking
 - SM-2 algorithm-based review scheduling.
 - Confidence score dashboard per topic.
 
-### Phase 3: Feynman Module
+### Phase 4: Feynman Module
 - "Explain this concept" open-ended prompt.
 - AI identifies missing keywords or logical leaps.
 
-### Phase 4: Mentor Persona Engine
+### Phase 5: Mentor Persona Engine
 - Style profiles (tone, analogy domain, signature keywords, depth level).
 - Style transfer agent to rewrite content in a mentor's voice.
 - Cross-persona discovery for struggling learners.
 
-### Phase 5: Multi-Format Assessment
+### Phase 6: Multi-Format Assessment
 - Multiple Choice, Fill-in-the-blanks, and open-ended questions.
 - Source citation on failure (link to original PDF page).
 

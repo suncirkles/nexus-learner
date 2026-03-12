@@ -58,6 +58,15 @@ def mock_tesseract():
         yield mock_ocr
 
 @pytest.fixture
+def mock_critic():
+    with patch.object(workflows.phase1_ingestion.critic_agent, 'chain') as mock_chain:
+        mock_chain.invoke.return_value = GroundingEvaluation(
+            score=5,
+            feedback="Strongly grounded."
+        )
+        yield mock_chain
+
+@pytest.fixture
 def mock_classifier():
     with patch('core.models.get_llm') as mock_get_llm:
         mock_model = MagicMock()
@@ -67,10 +76,16 @@ def mock_classifier():
             subtopic_id = 1
             
         mock_model.with_structured_output.return_value.invoke.return_value = MockClassification()
-        mock_model.invoke.return_value.content = "Test Document Title"
+        
+        # Ensure title generation works whether called via .invoke() or directly (RunnableLambda)
+        mock_res = MagicMock()
+        mock_res.content = "Test Document Title"
+        mock_model.invoke.return_value = mock_res
+        mock_model.return_value = mock_res
+        
         yield mock_model
 
-def test_e2e_hierarchical_workflow(mock_embeddings, mock_curator, mock_socratic_chain, mock_tesseract, mock_classifier):
+def test_e2e_hierarchical_workflow(mock_embeddings, mock_curator, mock_socratic_chain, mock_tesseract, mock_classifier, mock_critic):
     """Verifies the expanded Phase 1 flow: Ingest -> Curate -> Generate -> Critic."""
     file_path = os.path.join("documents", "gemini 3 developer guide march 2026.pdf")
     doc_id = str(uuid.uuid4())

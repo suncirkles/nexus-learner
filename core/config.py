@@ -32,7 +32,14 @@ class Settings(BaseSettings):
     QDRANT_COLLECTION_NAME: str = "nexus_chunks"
     
     # Application State
-    AUTO_ACCEPT_CONTENT: bool = False # If True, bypasses Mentor Review flag
+    AUTO_ACCEPT_CONTENT: bool = False  # If True, bypasses Mentor Review flag
+
+    # Web Scraping Settings
+    WEB_SCRAPE_TIMEOUT: int = 10            # HTTP request timeout seconds
+    WEB_MAX_PAGES_PER_TOPIC: int = 3        # Max pages to scrape per topic
+    WEB_MAX_CONTENT_CHARS: int = 8000       # Max chars per scraped page
+    WEB_SEARCH_MAX_RESULTS: int = 5         # DuckDuckGo results per query
+    CONTENT_SAFETY_ENABLED: bool = True     # Enable safety guardrails
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

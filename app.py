@@ -183,7 +183,7 @@ def render_dashboard():
     try:
         db = SessionLocal()
         
-        subjects = db.query(Subject).all()
+        subjects = db.query(Subject).filter(Subject.is_archived == False).all()
         
         if not subjects:
             st.info("No subjects found. Head over to 'Study Materials' to define your first subject and upload documents!")
@@ -277,7 +277,7 @@ def render_study_materials():
         # Step-based UI
         st.subheader("1. Subject Context")
 
-        subjects = db.query(Subject).all()
+        subjects = db.query(Subject).filter(Subject.is_archived == False).all()
 
         if not subjects:
             st.info("No subjects found. Please create your first subject below.")
@@ -451,7 +451,7 @@ def render_mentor_review():
         m_tabs = st.tabs(["⏳ Pending Review", "✅ Approved Items", "🗑️ Review Bin"])
 
         with m_tabs[0]:
-            subjects = db.query(Subject).all()
+            subjects = db.query(Subject).filter(Subject.is_archived == False).all()
             if not subjects:
                 st.info("No materials available for review.")
 
@@ -511,7 +511,7 @@ def render_mentor_review():
 
         with m_tabs[1]:
             st.subheader("Approved Knowledge")
-            subjects = db.query(Subject).all()
+            subjects = db.query(Subject).filter(Subject.is_archived == False).all()
             for subj in subjects:
                 topics = db.query(Topic).filter(Topic.subject_id == subj.id).order_by(Topic.created_at.desc()).all()
 
@@ -623,7 +623,7 @@ def render_learner_view():
         db = SessionLocal()
         
         # 1. Subject Selection
-        subjects = db.query(Subject).all()
+        subjects = db.query(Subject).filter(Subject.is_archived == False).all()
         if not subjects:
             st.info("No subjects available.")
             return
@@ -674,8 +674,8 @@ def render_learner_view():
 
 def render_system_tools():
     st.header("⚙️ Administrative Controls")
-    db = SessionLocal()
     try:
+        db = SessionLocal()
         from core.database import Document as DBDocument
 
         st.warning("These actions are destructive and cannot be undone.")
@@ -685,48 +685,80 @@ def render_system_tools():
 
         st.divider()
         st.divider()
-        st.subheader("Subject & Topic Management")
+        
+        sys_tabs = st.tabs(["🟢 Active Subjects", "📦 Archived Subjects"])
+        
+        with sys_tabs[0]:
+            st.subheader("Manage Active Subjects & Topics")
+            active_subjects = db.query(Subject).filter(Subject.is_archived == False).all()
+            
+            if not active_subjects:
+                st.info("No active subjects.")
+                
+            for subj in active_subjects:
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([0.6, 0.2, 0.2])
+                    new_subj_name = col1.text_input(f"Edit Subject Name", value=subj.name, key=f"edit_subj_{subj.id}")
+                    if col2.button("Update Name", key=f"upd_subj_{subj.id}"):
+                        subj.name = new_subj_name
+                        db.commit()
+                        st.success("Subject updated!")
+                        st.rerun()
+                    if col3.button("📦 Archive Subject", key=f"arch_subj_{subj.id}"):
+                        subj.is_archived = True
+                        db.commit()
+                        st.success(f"Archived '{subj.name}'.")
+                        st.rerun()
 
-        # Subject Editing
-        subjects = db.query(Subject).all()
-        for subj in subjects:
-            col1, col2, col3 = st.columns([0.6, 0.2, 0.2])
-            new_subj_name = col1.text_input(f"Edit Subject Name", value=subj.name, key=f"edit_subj_{subj.id}")
-            if col2.button("Update Name", key=f"upd_subj_{subj.id}"):
-                subj.name = new_subj_name
-                db.commit()
-                st.success("Subject updated!")
-                st.rerun()
-            if col3.button("Delete Subject", key=f"del_subj_{subj.id}"):
-                # Recursive delete
-                documents = db.query(DBDocument).filter(DBDocument.subject_id == subj.id).all()
-                for d in documents:
-                    topics = db.query(Topic).filter(Topic.document_id == d.id).all()
-                    for t in topics:
-                        delete_topic_data(t.id, d.id)
-                    db.delete(d)
-                db.delete(subj)
-                db.commit()
-                st.success("Subject and all its data deleted.")
-                st.rerun()
+                    # Topic Editing within Subject
+                    topics = db.query(Topic).filter(Topic.subject_id == subj.id).all()
+                    
+                    if topics:
+                        st.markdown("**(Topics)**")
+                    for topic in topics:
+                        tcol1, tcol2, tcol3 = st.columns([0.6, 0.2, 0.2])
+                        new_topic_name = tcol1.text_input(f"   ↳ Edit Topic Name", value=topic.name, key=f"edit_top_{topic.id}")
+                        if tcol2.button("Update Topic", key=f"upd_top_{topic.id}"):
+                            topic.name = new_topic_name
+                            db.commit()
+                            st.success("Topic updated!")
+                            st.rerun()
+                        if tcol3.button("Delete Topic", key=f"del_top_{topic.id}"):
+                            doc = db.query(DBDocument).filter(DBDocument.id == topic.document_id).first()
+                            delete_topic_data(topic.id, doc.id)
+                            st.rerun()
 
-            # Topic Editing within Subject
-            topics = db.query(Topic).filter(Topic.subject_id == subj.id).all()
+        with sys_tabs[1]:
+            st.subheader("Manage Archived Subjects")
+            archived_subjects = db.query(Subject).filter(Subject.is_archived == True).all()
+            
+            if not archived_subjects:
+                st.info("No archived subjects.")
+                
+            for subj in archived_subjects:
+                with st.container(border=True):
+                    st.markdown(f"**{subj.name}**")
+                    col1, col2 = st.columns(2)
+                    
+                    if col1.button("♻️ Restore Subject", key=f"rest_subj_{subj.id}"):
+                        subj.is_archived = False
+                        db.commit()
+                        st.success(f"Restored '{subj.name}'.")
+                        st.rerun()
+                        
+                    if col2.button("🚨 Permanently Delete", type="primary", key=f"perm_del_{subj.id}"):
+                        # Recursive delete
+                        documents = db.query(DBDocument).filter(DBDocument.subject_id == subj.id).all()
+                        for d in documents:
+                            topics = db.query(Topic).filter(Topic.document_id == d.id).all()
+                            for t in topics:
+                                delete_topic_data(t.id, d.id)
+                            db.delete(d)
+                        db.delete(subj)
+                        db.commit()
+                        st.success(f"Permanently deleted '{subj.name}'.")
+                        st.rerun()
 
-            for topic in topics:
-                tcol1, tcol2, tcol3 = st.columns([0.6, 0.2, 0.2])
-                new_topic_name = tcol1.text_input(f"   ↳ Edit Topic Name", value=topic.name, key=f"edit_top_{topic.id}")
-                if tcol2.button("Update Topic", key=f"upd_top_{topic.id}"):
-                    topic.name = new_topic_name
-                    db.commit()
-                    st.success("Topic updated!")
-                    st.rerun()
-                if tcol3.button("Delete Topic", key=f"del_top_{topic.id}"):
-                    # Specific topic delete
-                    doc = db.query(DBDocument).filter(DBDocument.id == topic.document_id).first()
-                    delete_topic_data(topic.id, doc.id)
-                    st.rerun()
-            st.divider()
     finally:
         db.close()
 

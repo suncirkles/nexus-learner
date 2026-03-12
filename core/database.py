@@ -42,6 +42,7 @@ class Subject(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True)
+    is_archived = Column(Boolean, default=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships

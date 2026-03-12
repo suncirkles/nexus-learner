@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+agentic/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# Database
+*.db
+
+# Qdrant data
+qdrant_data/
+
+# Temp files
+tmp_*
+temp_uploads/*
+!temp_uploads/.gitkeep
+
+# Test cache
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Gemini agent artifacts
+.gemini/

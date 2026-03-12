@@ -46,7 +46,7 @@ class CriticAgent:
                  # Optional auto-reject heuristic based on eval
                  if eval_result.score < 3:
                       # If it severely hallucinated, force disapproval regardless of auto_accept
-                      fc.is_approved = False 
+                      fc.status = "rejected"
                  
                  db.commit()
                  

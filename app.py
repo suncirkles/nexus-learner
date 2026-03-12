@@ -180,217 +180,226 @@ def render_flashcard_list(sub_id, status="approved"):
 
 def render_dashboard():
     st.header("🏠 Agentic Learning Dashboard")
-    db = SessionLocal()
-    
-    subjects = db.query(Subject).all()
-    
-    if not subjects:
-        st.info("No subjects found. Head over to 'Study Materials' to define your first subject and upload documents!")
-        db.close()
-        return
-
-    col_kb, col_stats = st.columns([0.7, 0.3])
-    
-    with col_kb:
-        st.subheader("📚 My Subjects")
+    try:
+        db = SessionLocal()
         
-        # Grid layout for subject tiles
-        cols_per_row = 2
-        for i in range(0, len(subjects), cols_per_row):
-            row_cols = st.columns(cols_per_row)
-            for j in range(cols_per_row):
-                if i + j < len(subjects):
-                    subj = subjects[i + j]
-                    
-                    # Calculate Stats
-                    topic_count = db.query(func.count(Topic.id)).filter(Topic.subject_id == subj.id).scalar()
-                    
-                    # Flashcard Stats
-                    topics = db.query(Topic).filter(Topic.subject_id == subj.id).all()
-                    topic_ids = [t.id for t in topics]
-                    subtopics = db.query(Subtopic).filter(Subtopic.topic_id.in_(topic_ids)).all() if topic_ids else []
-                    subtopic_ids = [s.id for s in subtopics]
-                    
-                    approved_count = 0
-                    pending_count = 0
-                    if subtopic_ids:
-                        approved_count = db.query(func.count(Flashcard.id)).filter(
-                            Flashcard.subtopic_id.in_(subtopic_ids), 
-                            Flashcard.status == "approved"
-                        ).scalar()
-                        pending_count = db.query(func.count(Flashcard.id)).filter(
-                            Flashcard.subtopic_id.in_(subtopic_ids), 
-                            Flashcard.status == "pending"
-                        ).scalar()
+        subjects = db.query(Subject).all()
+        
+        if not subjects:
+            st.info("No subjects found. Head over to 'Study Materials' to define your first subject and upload documents!")
+            return
 
-                    with row_cols[j]:
-                        st.markdown(f"""
-                        <div class="subject-tile">
-                            <div class="subject-title">📁 {subj.name}</div>
-                            <div class="stat-row">
-                                <span class="stat-label">📘 Topics:</span>
-                                <span class="stat-value">{topic_count}</span>
-                            </div>
-                            <div class="stat-row">
-                                <span class="stat-label">✅ Approved Cards:</span>
-                                <span class="stat-value">{approved_count}</span>
-                            </div>
-                            <div class="stat-row">
-                                <span class="stat-label">⏳ Pending Review:</span>
-                                <span class="stat-value">{pending_count}</span>
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+        col_kb, col_stats = st.columns([0.7, 0.3])
+    
+        with col_kb:
+            st.subheader("📚 My Subjects")
+            
+            from sqlalchemy import case, Integer
+            # Pre-calculate topic counts for all subjects
+            topic_counts_raw = db.query(Topic.subject_id, func.count(Topic.id)).group_by(Topic.subject_id).all()
+            topic_counts = {r[0]: r[1] for r in topic_counts_raw}
+            
+            # Pre-calculate flashcard stats for all subjects using JOINs
+            fc_stats_raw = db.query(
+                Topic.subject_id,
+                func.sum(case((Flashcard.status == 'approved', 1), else_=0)).cast(Integer),
+                func.sum(case((Flashcard.status == 'pending', 1), else_=0)).cast(Integer)
+            ).select_from(Topic).join(Subtopic, Topic.id == Subtopic.topic_id).join(Flashcard, Subtopic.id == Flashcard.subtopic_id).group_by(Topic.subject_id).all()
+            
+            fc_stats = {r[0]: {"approved": r[1] or 0, "pending": r[2] or 0} for r in fc_stats_raw}
+            
+            # Grid layout for subject tiles
+            cols_per_row = 2
+            for i in range(0, len(subjects), cols_per_row):
+                row_cols = st.columns(cols_per_row)
+                for j in range(cols_per_row):
+                    if i + j < len(subjects):
+                        subj = subjects[i + j]
                         
-                        if st.button(f"Start Learning {subj.name}", key=f"select_subj_{subj.id}"):
-                            st.session_state.study_subject_id = subj.id
-                            # Clear specific topic/subtopic to let learner view handle defaults
-                            if "study_topic_id" in st.session_state: del st.session_state.study_topic_id
-                            if "study_subtopic_id" in st.session_state: del st.session_state.study_subtopic_id
-                            st.session_state.active_nav = "🧠 Learner"
-                            st.rerun()
+                        topic_count = topic_counts.get(subj.id, 0)
+                        stats = fc_stats.get(subj.id, {"approved": 0, "pending": 0})
+                        approved_count = stats["approved"]
+                        pending_count = stats["pending"]
 
-    with col_stats:
-        st.subheader("Global Stats")
-        total_q = db.query(func.count(Flashcard.id)).scalar()
-        approved_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "approved").scalar()
-        pending_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "pending").scalar()
-        rejected_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "rejected").scalar()
-        
-        st.metric("Approved (Study Ready)", approved_q)
-        st.metric("Pending Review", pending_q)
-        st.metric("Review Bin (Rejected)", rejected_q)
-        
-        if total_q > 0:
-            progress = approved_q / total_q
-            st.progress(progress, text=f"{int(progress*100)}% Content Verified")
-    
-    db.close()
+                        with row_cols[j]:
+                            st.markdown(f"""
+                            <div class="subject-tile">
+                                <div class="subject-title">📁 {subj.name}</div>
+                                <div class="stat-row">
+                                    <span class="stat-label">📘 Topics:</span>
+                                    <span class="stat-value">{topic_count}</span>
+                                </div>
+                                <div class="stat-row">
+                                    <span class="stat-label">✅ Approved Cards:</span>
+                                    <span class="stat-value">{approved_count}</span>
+                                </div>
+                                <div class="stat-row">
+                                    <span class="stat-label">⏳ Pending Review:</span>
+                                    <span class="stat-value">{pending_count}</span>
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            if st.button(f"Start Learning {subj.name}", key=f"select_subj_{subj.id}"):
+                                st.session_state.study_subject_id = subj.id
+                                # Clear specific topic/subtopic to let learner view handle defaults
+                                if "study_topic_id" in st.session_state: del st.session_state.study_topic_id
+                                if "study_subtopic_id" in st.session_state: del st.session_state.study_subtopic_id
+                                st.session_state.active_nav = "🧠 Learner"
+                                st.rerun()
+
+        with col_stats:
+            st.subheader("Global Stats")
+            total_q = db.query(func.count(Flashcard.id)).scalar()
+            approved_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "approved").scalar()
+            pending_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "pending").scalar()
+            rejected_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "rejected").scalar()
+            
+            st.metric("Approved (Study Ready)", approved_q)
+            st.metric("Pending Review", pending_q)
+            st.metric("Review Bin (Rejected)", rejected_q)
+            
+            if total_q > 0:
+                progress = approved_q / total_q
+                st.progress(progress, text=f"{int(progress*100)}% Content Verified")
+    finally:
+        db.close()
 
 def render_study_materials():
     st.header("📚 Study Material Ingestion")
     db = SessionLocal()
-    
-    # Use session state to manage the current selected subject persistently
-    if "ingest_subject_id" not in st.session_state:
-        st.session_state.ingest_subject_id = None
+    try:
 
-    # Step-based UI
-    st.subheader("1. Subject Context")
-    
-    subjects = db.query(Subject).all()
-    
-    if not subjects:
-        st.info("No subjects found. Please create your first subject below.")
-        subj_mode = "Create New Subject"
-    else:
-        subj_mode = st.radio("What would you like to do?", ["Select Existing Subject", "Create New Subject"], horizontal=True)
+        # Use session state to manage the current selected subject persistently
+        if "ingest_subject_id" not in st.session_state:
+            st.session_state.ingest_subject_id = None
 
-    if subj_mode == "Create New Subject":
-        with st.container(border=True):
-            new_subj_name = st.text_input("New Subject Name (e.g. Machine Learning)")
-            if st.button("✨ Create Subject"):
-                if new_subj_name:
+        # Step-based UI
+        st.subheader("1. Subject Context")
+
+        subjects = db.query(Subject).all()
+
+        if not subjects:
+            st.info("No subjects found. Please create your first subject below.")
+            subj_mode = "Create New Subject"
+        else:
+            subj_mode = st.radio("What would you like to do?", ["Select Existing Subject", "Create New Subject"], horizontal=True)
+
+        if subj_mode == "Create New Subject":
+            with st.container(border=True):
+                new_subj_name = st.text_input("New Subject Name (e.g. Machine Learning)")
+                if st.button("✨ Create Subject"):
+                    cleaned_name = new_subj_name.strip() if new_subj_name else ""
+                    if not cleaned_name:
+                        st.warning("Please enter a valid, non-empty name.")
+                    elif len(cleaned_name) > 100:
+                        st.warning("Subject name is too long (maximum 100 characters).")
+                    else:
+                        try:
+                            new_subj = Subject(name=cleaned_name)
+                            db.add(new_subj)
+                            db.commit()
+                            st.session_state.ingest_subject_id = new_subj.id
+                            st.success(f"Subject '{new_subj_name}' created and selected!")
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error: {e}")
+        else:
+            # Select Existing
+            subject_names = [s.name for s in subjects]
+            current_idx = 0
+            if st.session_state.ingest_subject_id:
+                for i, s in enumerate(subjects):
+                    if s.id == st.session_state.ingest_subject_id:
+                        current_idx = i
+                        break
+
+            selected_name = st.selectbox("Choose Subject", subject_names, index=current_idx)
+            selected_subj = db.query(Subject).filter(Subject.name == selected_name).first()
+            st.session_state.ingest_subject_id = selected_subj.id
+            st.info(f"Adding artifacts to: **{selected_name}**")
+
+        st.divider()
+
+        # 2. Upload
+        if st.session_state.ingest_subject_id:
+            subject_id = st.session_state.ingest_subject_id
+            st.subheader(f"2. Upload Artifacts to '{db.query(Subject).get(subject_id).name}'")
+
+            with st.expander("📥 Click to Upload PDF or Image", expanded=True):
+                uploaded_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "jpeg"])
+                if uploaded_file:
+                    if uploaded_file.size > 50 * 1024 * 1024:
+                        st.error("File exceeds the 50MB limit (50MB max).")
+                        uploaded_file = None
+                    else:
+                        st.success(f"File selected: {uploaded_file.name}")
+                if uploaded_file and st.button("🚀 Process & Generate Hierarchy"):
+                    doc_id = str(uuid.uuid4())
+                    safe_filename = "".join(c for c in uploaded_file.name if c.isalnum() or c in " ._-").strip()
+                    os.makedirs("temp_uploads", exist_ok=True)
+                    file_path = os.path.join("temp_uploads", f"{doc_id}_{safe_filename}")
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+
+                    progress_bar = st.progress(0, text="Initializing...")
+
+                    state = {
+                        "file_path": file_path,
+                        "doc_id": doc_id,
+                        "subject_id": subject_id,
+                        "chunks": [],
+                        "hierarchy": [],
+                        "doc_summary": "",
+                        "current_chunk_index": 0,
+                        "generated_flashcards": [],
+                        "status_message": "Starting ingestion..."
+                    }
+
                     try:
-                        new_subj = Subject(name=new_subj_name)
-                        db.add(new_subj)
-                        db.commit()
-                        st.session_state.ingest_subject_id = new_subj.id
-                        st.success(f"Subject '{new_subj_name}' created and selected!")
+                        # 1. Sync Phase: Ingest, Curate, and Initial Burst
+                        sync_limit = 5 # Reduced for speed in demo
+                        processed_count = 0
+
+                        stream = phase1_graph.stream(state)
+
+                        for event in stream:
+                            node_name = list(event.keys())[0]
+                            state.update(event[node_name])
+
+                            if node_name == "ingest":
+                                progress_bar.progress(10, text="Ingested. Analyzing structure...")
+                            elif node_name == "curate":
+                                progress_bar.progress(20, text="Hierarchy extracted. Starting Q&A generation...")
+                            if node_name == "generate":
+                                processed_count += 1
+                                msg = state.get("status_message", "Generating...")
+                                p = 20 + int((processed_count / min(len(state["chunks"]), sync_limit)) * 70)
+                                progress_bar.progress(min(p, 90), text=msg)
+
+                            if node_name == "increment" and processed_count >= sync_limit:
+                                break
+
+                        if processed_count < len(state["chunks"]):
+                            from core.background import start_background_task
+                            start_background_task(state, doc_id, filename=uploaded_file.name)
+                            st.toast(f"Initial {processed_count} cards for '{uploaded_file.name}' ready! Rest processing in background.")
+
+                        progress_bar.progress(100, text="Initial Processing Complete!")
+                        st.success(f"Successfully started '{uploaded_file.name}'!")
                         time.sleep(1)
                         st.rerun()
                     except Exception as e:
-                        st.error(f"Error: {e}")
-                else:
-                    st.warning("Please enter a name.")
-    else:
-        # Select Existing
-        subject_names = [s.name for s in subjects]
-        current_idx = 0
-        if st.session_state.ingest_subject_id:
-            for i, s in enumerate(subjects):
-                if s.id == st.session_state.ingest_subject_id:
-                    current_idx = i
-                    break
-        
-        selected_name = st.selectbox("Choose Subject", subject_names, index=current_idx)
-        selected_subj = db.query(Subject).filter(Subject.name == selected_name).first()
-        st.session_state.ingest_subject_id = selected_subj.id
-        st.info(f"Adding artifacts to: **{selected_name}**")
+                        st.error(f"Processing Error: {e}")
+                    finally:
+                        if os.path.exists(file_path):
+                            os.remove(file_path)
+        else:
+            st.warning("Please select or create a subject above before uploading artifacts.")
 
-    st.divider()
-    
-    # 2. Upload
-    if st.session_state.ingest_subject_id:
-        subject_id = st.session_state.ingest_subject_id
-        st.subheader(f"2. Upload Artifacts to '{db.query(Subject).get(subject_id).name}'")
-        
-        with st.expander("📥 Click to Upload PDF or Image", expanded=True):
-            uploaded_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "jpeg"])
-            if uploaded_file:
-                st.success(f"File selected: {uploaded_file.name}")
-            if uploaded_file and st.button("🚀 Process & Generate Hierarchy"):
-                doc_id = str(uuid.uuid4())
-                file_path = f"tmp_{uploaded_file.name}"
-                with open(file_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                
-                progress_bar = st.progress(0, text="Initializing...")
-                
-                state = {
-                    "file_path": file_path,
-                    "doc_id": doc_id,
-                    "subject_id": subject_id,
-                    "chunks": [],
-                    "hierarchy": [],
-                    "doc_summary": "",
-                    "current_chunk_index": 0,
-                    "generated_flashcards": [],
-                    "status_message": "Starting ingestion..."
-                }
-            
-                try:
-                    # 1. Sync Phase: Ingest, Curate, and Initial Burst
-                    sync_limit = 5 # Reduced for speed in demo
-                    processed_count = 0
-                    
-                    stream = phase1_graph.stream(state)
-                    
-                    for event in stream:
-                        node_name = list(event.keys())[0]
-                        state.update(event[node_name])
-                        
-                        if node_name == "ingest":
-                            progress_bar.progress(10, text="Ingested. Analyzing structure...")
-                        elif node_name == "curate":
-                            progress_bar.progress(20, text="Hierarchy extracted. Starting Q&A generation...")
-                        if node_name == "generate":
-                            processed_count += 1
-                            msg = state.get("status_message", "Generating...")
-                            p = 20 + int((processed_count / min(len(state["chunks"]), sync_limit)) * 70)
-                            progress_bar.progress(min(p, 90), text=msg)
-                        
-                        if node_name == "increment" and processed_count >= sync_limit:
-                            break
-                    
-                    if processed_count < len(state["chunks"]):
-                        from core.background import start_background_task
-                        start_background_task(state, doc_id, filename=uploaded_file.name)
-                        st.toast(f"Initial {processed_count} cards for '{uploaded_file.name}' ready! Rest processing in background.")
-                    
-                    progress_bar.progress(100, text="Initial Processing Complete!")
-                    st.success(f"Successfully started '{uploaded_file.name}'!")
-                    os.remove(file_path)
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Processing Error: {e}")
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-    else:
-        st.warning("Please select or create a subject above before uploading artifacts.")
-
-    db.close()
+    finally:
+        db.close()
 
     # Background Monitor
     from core.background import background_tasks, stop_background_task
@@ -437,98 +446,100 @@ def render_study_materials():
 def render_mentor_review():
     st.header("👨‍🏫 Mentor Review Workspace")
     db = SessionLocal()
-    
-    m_tabs = st.tabs(["⏳ Pending Review", "✅ Approved Items", "🗑️ Review Bin"])
-    
-    with m_tabs[0]:
-        subjects = db.query(Subject).all()
-        if not subjects:
-            st.info("No materials available for review.")
-        
-        for subj in subjects:
-            topics = db.query(Topic).filter(Topic.subject_id == subj.id).all()
-            
-            has_pending_in_subj = False
-            for topic in topics:
-                subtopics = db.query(Subtopic).filter(Subtopic.topic_id == topic.id).all()
-                for sub in subtopics:
-                    if db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").first():
-                        has_pending_in_subj = True
-                        break
-            
-            if has_pending_in_subj:
-                st.markdown(f"## 📁 Subject: {subj.name}")
+    try:
+
+        m_tabs = st.tabs(["⏳ Pending Review", "✅ Approved Items", "🗑️ Review Bin"])
+
+        with m_tabs[0]:
+            subjects = db.query(Subject).all()
+            if not subjects:
+                st.info("No materials available for review.")
+
+            for subj in subjects:
+                topics = db.query(Topic).filter(Topic.subject_id == subj.id).all()
+
+                has_pending_in_subj = False
                 for topic in topics:
                     subtopics = db.query(Subtopic).filter(Subtopic.topic_id == topic.id).all()
-                    
-                    # Efficiently check for any pending flashcards in this topic
-                    sub_ids = [s.id for s in subtopics]
-                    has_pending_in_topic = db.query(Flashcard).filter(
-                        Flashcard.subtopic_id.in_(sub_ids), 
-                        Flashcard.status == "pending"
-                    ).first() is not None
-                    
-                    if has_pending_in_topic:
-                        st.markdown(f"### 📘 Topic: {topic.name}")
-                        with st.expander(f"📦 Topic: {topic.name} Actions", expanded=False):
-                            t_col1, t_col2, _ = st.columns([0.25, 0.25, 0.5])
-                            if t_col1.button("✅ Approve All Topic", key=f"app_topic_{topic.id}"):
-                                db.query(Flashcard).filter(Flashcard.subtopic_id.in_(sub_ids), Flashcard.status == "pending").update({"status": "approved"}, synchronize_session=False)
-                                db.commit()
-                                st.rerun()
-                            if t_col2.button("❌ Reject All Topic", key=f"rej_topic_{topic.id}"):
-                                db.query(Flashcard).filter(Flashcard.subtopic_id.in_(sub_ids), Flashcard.status == "pending").update({"status": "rejected"}, synchronize_session=False)
-                                db.commit()
-                                st.rerun()
-                            
-                            for sub in subtopics:
-                                pending_fcs = db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").all()
-                                if pending_fcs:
-                                    with st.container(border=True):
-                                        st.markdown(f"#### 📖 {sub.name} ({len(pending_fcs)} Pending)")
-                                        b_col1, b_col2, _ = st.columns([0.2, 0.2, 0.6])
-                                        if b_col1.button("✅ Approve All", key=f"app_all_{sub.id}"):
-                                            db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").update({"status": "approved"})
-                                            db.commit()
-                                            st.rerun()
-                                        if b_col2.button("❌ Reject All", key=f"rej_all_{sub.id}"):
-                                            db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").update({"status": "rejected"})
-                                            db.commit()
-                                            st.rerun()
-                                        
-                                        render_flashcard_list(sub.id, "pending")
-                st.divider()
+                    for sub in subtopics:
+                        if db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").first():
+                            has_pending_in_subj = True
+                            break
 
-    with m_tabs[1]:
-        st.subheader("Approved Knowledge")
-        subjects = db.query(Subject).all()
-        for subj in subjects:
-            topics = db.query(Topic).filter(Topic.subject_id == subj.id).order_by(Topic.created_at.desc()).all()
-            
-            if topics:
-                st.markdown(f"### 📁 Subject: {subj.name}")
-                for topic in topics:
+                if has_pending_in_subj:
+                    st.markdown(f"## 📁 Subject: {subj.name}")
+                    for topic in topics:
                         subtopics = db.query(Subtopic).filter(Subtopic.topic_id == topic.id).all()
-                        st.markdown(f"#### 📘 Topic: {topic.name}")
-                        with st.container(border=True):
-                            st.markdown(f"**Show All in {topic.name}**")
-                            for sub in subtopics:
-                                approved_count = db.query(func.count(Flashcard.id)).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "approved").scalar()
-                                if approved_count > 0:
-                                    with st.expander(f"📖 {sub.name} ({approved_count})", expanded=False):
-                                        render_flashcard_list(sub.id, "approved")
-                        st.divider()
 
-    with m_tabs[2]:
-        st.subheader("Review Bin (Rejected)")
-        st.caption("Items here can be recreated with comments or permanently deleted.")
-        rejected_fcs = db.query(Flashcard).filter(Flashcard.status == "rejected").order_by(Flashcard.created_at.desc()).all()
-        if not rejected_fcs:
-            st.info("Review bin is empty.")
-        for fc in rejected_fcs:
-            render_flashcard_review_card(db, fc, "rejected")
+                        # Efficiently check for any pending flashcards in this topic
+                        sub_ids = [s.id for s in subtopics]
+                        has_pending_in_topic = db.query(Flashcard).filter(
+                            Flashcard.subtopic_id.in_(sub_ids), 
+                            Flashcard.status == "pending"
+                        ).first() is not None
 
-    db.close()
+                        if has_pending_in_topic:
+                            st.markdown(f"### 📘 Topic: {topic.name}")
+                            with st.expander(f"📦 Topic: {topic.name} Actions", expanded=False):
+                                t_col1, t_col2, _ = st.columns([0.25, 0.25, 0.5])
+                                if t_col1.button("✅ Approve All Topic", key=f"app_topic_{topic.id}"):
+                                    db.query(Flashcard).filter(Flashcard.subtopic_id.in_(sub_ids), Flashcard.status == "pending").update({"status": "approved"}, synchronize_session=False)
+                                    db.commit()
+                                    st.rerun()
+                                if t_col2.button("❌ Reject All Topic", key=f"rej_topic_{topic.id}"):
+                                    db.query(Flashcard).filter(Flashcard.subtopic_id.in_(sub_ids), Flashcard.status == "pending").update({"status": "rejected"}, synchronize_session=False)
+                                    db.commit()
+                                    st.rerun()
+
+                                for sub in subtopics:
+                                    pending_fcs = db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").all()
+                                    if pending_fcs:
+                                        with st.container(border=True):
+                                            st.markdown(f"#### 📖 {sub.name} ({len(pending_fcs)} Pending)")
+                                            b_col1, b_col2, _ = st.columns([0.2, 0.2, 0.6])
+                                            if b_col1.button("✅ Approve All", key=f"app_all_{sub.id}"):
+                                                db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").update({"status": "approved"})
+                                                db.commit()
+                                                st.rerun()
+                                            if b_col2.button("❌ Reject All", key=f"rej_all_{sub.id}"):
+                                                db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").update({"status": "rejected"})
+                                                db.commit()
+                                                st.rerun()
+
+                                            render_flashcard_list(sub.id, "pending")
+                    st.divider()
+
+        with m_tabs[1]:
+            st.subheader("Approved Knowledge")
+            subjects = db.query(Subject).all()
+            for subj in subjects:
+                topics = db.query(Topic).filter(Topic.subject_id == subj.id).order_by(Topic.created_at.desc()).all()
+
+                if topics:
+                    st.markdown(f"### 📁 Subject: {subj.name}")
+                    for topic in topics:
+                            subtopics = db.query(Subtopic).filter(Subtopic.topic_id == topic.id).all()
+                            st.markdown(f"#### 📘 Topic: {topic.name}")
+                            with st.container(border=True):
+                                st.markdown(f"**Show All in {topic.name}**")
+                                for sub in subtopics:
+                                    approved_count = db.query(func.count(Flashcard.id)).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "approved").scalar()
+                                    if approved_count > 0:
+                                        with st.expander(f"📖 {sub.name} ({approved_count})", expanded=False):
+                                            render_flashcard_list(sub.id, "approved")
+                            st.divider()
+
+        with m_tabs[2]:
+            st.subheader("Review Bin (Rejected)")
+            st.caption("Items here can be recreated with comments or permanently deleted.")
+            rejected_fcs = db.query(Flashcard).filter(Flashcard.status == "rejected").order_by(Flashcard.created_at.desc()).all()
+            if not rejected_fcs:
+                st.info("Review bin is empty.")
+            for fc in rejected_fcs:
+                render_flashcard_review_card(db, fc, "rejected")
+
+    finally:
+        db.close()
 
 def render_flashcard_review_card(db, fc, current_status):
     st.markdown(f"""
@@ -608,115 +619,116 @@ def render_flashcard_review_card(db, fc, current_status):
 
 def render_learner_view():
     st.header("🧠 Active Recall Study Room")
-    db = SessionLocal()
-    
-    # 1. Subject Selection
-    subjects = db.query(Subject).all()
-    if not subjects:
-        st.info("No subjects available.")
-        db.close()
-        return
-    
-    subject_names = [s.name for s in subjects]
-    default_subj_idx = 0
-    if "study_subject_id" in st.session_state:
-        for i, s in enumerate(subjects):
-            if s.id == st.session_state.study_subject_id:
-                default_subj_idx = i
-                break
-    
-    selected_subject_name = st.selectbox("Select Subject", subject_names, index=default_subj_idx)
-    selected_subject = db.query(Subject).filter(Subject.name == selected_subject_name).first()
-    
-    # 2. Topic Selection within Subject
-    topics = db.query(Topic).filter(Topic.subject_id == selected_subject.id).all()
-    
-    if not topics:
-        st.info("No topics available for this subject.")
-        db.close()
-        return
+    try:
+        db = SessionLocal()
         
-    topic_names = [t.name for t in topics]
-    default_topic_idx = 0
-    if "study_topic_id" in st.session_state:
-        for i, t in enumerate(topics):
-            if t.id == st.session_state.study_topic_id:
-                default_topic_idx = i
-                break
+        # 1. Subject Selection
+        subjects = db.query(Subject).all()
+        if not subjects:
+            st.info("No subjects available.")
+            return
     
-    selected_topic_name = st.selectbox("Select Topic to Study", topic_names, index=default_topic_idx)
-    selected_topic = db.query(Topic).filter(Topic.name == selected_topic_name).first()
+        subject_names = [s.name for s in subjects]
+        default_subj_idx = 0
+        if "study_subject_id" in st.session_state:
+            for i, s in enumerate(subjects):
+                if s.id == st.session_state.study_subject_id:
+                    default_subj_idx = i
+                    break
     
-    subtopics = db.query(Subtopic).filter(Subtopic.topic_id == selected_topic.id).all()
+        selected_subject_name = st.selectbox("Select Subject", subject_names, index=default_subj_idx)
+        selected_subject = db.query(Subject).filter(Subject.name == selected_subject_name).first()
     
-    for sub in subtopics:
-        # Determine if this subtopic should be expanded (deep link)
-        is_expanded = False
-        if "study_subtopic_id" in st.session_state and st.session_state.study_subtopic_id == sub.id:
-            is_expanded = True
-        
-        approved_count = db.query(func.count(Flashcard.id)).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "approved").scalar()
-        if approved_count > 0:
-            with st.expander(f"📘 {sub.name} ({approved_count})", expanded=is_expanded):
-                render_flashcard_list(sub.id, "approved")
+        # 2. Topic Selection within Subject
+        topics = db.query(Topic).filter(Topic.subject_id == selected_subject.id).all()
     
-    db.close()
+        if not topics:
+            st.info("No topics available for this subject.")
+            return
+            
+        topic_names = [t.name for t in topics]
+        default_topic_idx = 0
+        if "study_topic_id" in st.session_state:
+            for i, t in enumerate(topics):
+                if t.id == st.session_state.study_topic_id:
+                    default_topic_idx = i
+                    break
+    
+        selected_topic_name = st.selectbox("Select Topic to Study", topic_names, index=default_topic_idx)
+        selected_topic = db.query(Topic).filter(Topic.name == selected_topic_name).first()
+    
+        subtopics = db.query(Subtopic).filter(Subtopic.topic_id == selected_topic.id).all()
+    
+        for sub in subtopics:
+            # Determine if this subtopic should be expanded (deep link)
+            is_expanded = False
+            if "study_subtopic_id" in st.session_state and st.session_state.study_subtopic_id == sub.id:
+                is_expanded = True
+            
+            approved_count = db.query(func.count(Flashcard.id)).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "approved").scalar()
+            if approved_count > 0:
+                with st.expander(f"📘 {sub.name} ({approved_count})", expanded=is_expanded):
+                    render_flashcard_list(sub.id, "approved")
+    finally:
+        db.close()
 
 def render_system_tools():
     st.header("⚙️ Administrative Controls")
     db = SessionLocal()
-    from core.database import Document as DBDocument
-    
-    st.warning("These actions are destructive and cannot be undone.")
-    
-    if st.button("🚨 Global Reset: Wipe Database & Qdrant Collections"):
-        reset_entire_system()
+    try:
+        from core.database import Document as DBDocument
 
-    st.divider()
-    st.divider()
-    st.subheader("Subject & Topic Management")
-    
-    # Subject Editing
-    subjects = db.query(Subject).all()
-    for subj in subjects:
-        col1, col2, col3 = st.columns([0.6, 0.2, 0.2])
-        new_subj_name = col1.text_input(f"Edit Subject Name", value=subj.name, key=f"edit_subj_{subj.id}")
-        if col2.button("Update Name", key=f"upd_subj_{subj.id}"):
-            subj.name = new_subj_name
-            db.commit()
-            st.success("Subject updated!")
-            st.rerun()
-        if col3.button("Delete Subject", key=f"del_subj_{subj.id}"):
-            # Recursive delete
-            documents = db.query(DBDocument).filter(DBDocument.subject_id == subj.id).all()
-            for d in documents:
-                topics = db.query(Topic).filter(Topic.document_id == d.id).all()
-                for t in topics:
-                    delete_topic_data(t.id, d.id)
-                db.delete(d)
-            db.delete(subj)
-            db.commit()
-            st.success("Subject and all its data deleted.")
-            st.rerun()
-        
-        # Topic Editing within Subject
-        topics = db.query(Topic).filter(Topic.subject_id == subj.id).all()
-        
-        for topic in topics:
-            tcol1, tcol2, tcol3 = st.columns([0.6, 0.2, 0.2])
-            new_topic_name = tcol1.text_input(f"   ↳ Edit Topic Name", value=topic.name, key=f"edit_top_{topic.id}")
-            if tcol2.button("Update Topic", key=f"upd_top_{topic.id}"):
-                topic.name = new_topic_name
-                db.commit()
-                st.success("Topic updated!")
-                st.rerun()
-            if tcol3.button("Delete Topic", key=f"del_top_{topic.id}"):
-                # Specific topic delete
-                doc = db.query(DBDocument).filter(DBDocument.id == topic.document_id).first()
-                delete_topic_data(topic.id, doc.id)
-                st.rerun()
+        st.warning("These actions are destructive and cannot be undone.")
+
+        if st.button("🚨 Global Reset: Wipe Database & Qdrant Collections"):
+            reset_entire_system()
+
         st.divider()
-    db.close()
+        st.divider()
+        st.subheader("Subject & Topic Management")
+
+        # Subject Editing
+        subjects = db.query(Subject).all()
+        for subj in subjects:
+            col1, col2, col3 = st.columns([0.6, 0.2, 0.2])
+            new_subj_name = col1.text_input(f"Edit Subject Name", value=subj.name, key=f"edit_subj_{subj.id}")
+            if col2.button("Update Name", key=f"upd_subj_{subj.id}"):
+                subj.name = new_subj_name
+                db.commit()
+                st.success("Subject updated!")
+                st.rerun()
+            if col3.button("Delete Subject", key=f"del_subj_{subj.id}"):
+                # Recursive delete
+                documents = db.query(DBDocument).filter(DBDocument.subject_id == subj.id).all()
+                for d in documents:
+                    topics = db.query(Topic).filter(Topic.document_id == d.id).all()
+                    for t in topics:
+                        delete_topic_data(t.id, d.id)
+                    db.delete(d)
+                db.delete(subj)
+                db.commit()
+                st.success("Subject and all its data deleted.")
+                st.rerun()
+
+            # Topic Editing within Subject
+            topics = db.query(Topic).filter(Topic.subject_id == subj.id).all()
+
+            for topic in topics:
+                tcol1, tcol2, tcol3 = st.columns([0.6, 0.2, 0.2])
+                new_topic_name = tcol1.text_input(f"   ↳ Edit Topic Name", value=topic.name, key=f"edit_top_{topic.id}")
+                if tcol2.button("Update Topic", key=f"upd_top_{topic.id}"):
+                    topic.name = new_topic_name
+                    db.commit()
+                    st.success("Topic updated!")
+                    st.rerun()
+                if tcol3.button("Delete Topic", key=f"del_top_{topic.id}"):
+                    # Specific topic delete
+                    doc = db.query(DBDocument).filter(DBDocument.id == topic.document_id).first()
+                    delete_topic_data(topic.id, doc.id)
+                    st.rerun()
+            st.divider()
+    finally:
+        db.close()
 
 # --- Main Entry Point ---
 

@@ -3,7 +3,7 @@ import pytest
 import os
 import uuid
 from agents.ingestion import IngestionAgent
-from core.database import SessionLocal, Document, Base, engine
+from core.database import SessionLocal, Document, Subject, Base, engine
 
 @pytest.fixture(scope="function", autouse=True)
 def setup_db():
@@ -26,13 +26,20 @@ def test_duplicate_detection():
     doc.save(test_file)
     doc.close()
     
+    db = SessionLocal()
+    subject = Subject(name="Test Subject Duplicates")
+    db.add(subject)
+    db.commit()
+    subject_id = subject.id
+    db.close()
+    
     try:
         # First upload should succeed
-        agent.process_document(test_file, doc_id1)
+        agent.process_document(test_file, doc_id1, subject_id)
         
         # Second upload with same content should fail
         with pytest.raises(ValueError) as excinfo:
-            agent.process_document(test_file, doc_id2)
+            agent.process_document(test_file, doc_id2, subject_id)
         
         assert "Duplicate content detected" in str(excinfo.value)
         

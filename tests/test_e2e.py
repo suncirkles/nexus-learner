@@ -4,7 +4,7 @@ import uuid
 import workflows.phase1_ingestion
 from unittest.mock import patch, MagicMock
 
-from core.database import SessionLocal, ContentChunk, Flashcard, Topic, Subtopic, Base, engine
+from core.database import SessionLocal, ContentChunk, Flashcard, Topic, Subtopic, Subject, Base, engine
 from agents.socratic import FlashcardOutput
 from agents.critic import GroundingEvaluation
 from agents.curator import DocumentStructure, TopicStructure, SubtopicStructure
@@ -67,6 +67,7 @@ def mock_classifier():
             subtopic_id = 1
             
         mock_model.with_structured_output.return_value.invoke.return_value = MockClassification()
+        mock_model.invoke.return_value.content = "Test Document Title"
         yield mock_model
 
 def test_e2e_hierarchical_workflow(mock_embeddings, mock_curator, mock_socratic_chain, mock_tesseract, mock_classifier):
@@ -86,9 +87,17 @@ def test_e2e_hierarchical_workflow(mock_embeddings, mock_curator, mock_socratic_
     doc.save(file_path)
     doc.close()
     
+    db = SessionLocal()
+    subject = Subject(name="Test Subject E2E")
+    db.add(subject)
+    db.commit()
+    subject_id = subject.id
+    db.close()
+    
     initial_state = {
         "file_path": file_path,
         "doc_id": doc_id,
+        "subject_id": subject_id,
         "chunks": [],
         "hierarchy": [],
         "doc_summary": "",

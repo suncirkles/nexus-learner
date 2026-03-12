@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # status: "processing", "completed", "failed", "stopped"
 background_tasks: Dict[str, Dict[str, Any]] = {}
 stop_events: Dict[str, threading.Event] = {}
+_lock = threading.Lock()
 
 def run_remaining_generation(state: Dict[str, Any], doc_id: str, stop_event: threading.Event, filename: str = "Unknown"):
     """
@@ -26,30 +27,35 @@ def run_remaining_generation(state: Dict[str, Any], doc_id: str, stop_event: thr
     """
     try:
         logger.info(f"Background thread started for Document: {doc_id} ({filename})")
-        background_tasks[doc_id] = {
-            "status": "processing", 
-            "progress": 0, 
-            "total": len(state.get("chunks", [])),
-            "filename": filename
-        }
+        with _lock:
+            background_tasks[doc_id] = {
+                "status": "processing", 
+                "progress": 0, 
+                "total": len(state.get("chunks", [])),
+                "filename": filename
+            }
         
         # We resume the graph from the current state
         for event in phase1_graph.stream(state):
             # Check for interrupt
             if stop_event.is_set():
                 logger.info(f"Stop signal received for Document: {doc_id}")
-                background_tasks[doc_id]["status"] = "stopped"
+                with _lock:
+                    background_tasks[doc_id]["status"] = "stopped"
                 return
 
             if "generate" in event:
                 idx = event["generate"].get("current_chunk_index", 0)
-                background_tasks[doc_id]["progress"] = idx + 1
+                with _lock:
+                    background_tasks[doc_id]["progress"] = idx + 1
                 
-        background_tasks[doc_id]["status"] = "completed"
+        with _lock:
+            background_tasks[doc_id]["status"] = "completed"
         logger.info(f"Background thread finished for Document: {doc_id}")
     except Exception as e:
         logger.error(f"Error in background generation for {doc_id}: {e}")
-        background_tasks[doc_id] = {"status": "failed", "error": str(e)}
+        with _lock:
+            background_tasks[doc_id] = {"status": "failed", "error": str(e)}
 
 def start_background_task(state: Dict[str, Any], doc_id: str, filename: str = "Unknown"):
     """Spawns a new thread for background generation."""
@@ -61,7 +67,8 @@ def start_background_task(state: Dict[str, Any], doc_id: str, filename: str = "U
 
 def stop_background_task(doc_id: str):
     """Signals a background thread to stop."""
-    if doc_id in stop_events:
-        stop_events[doc_id].set()
-        if doc_id in background_tasks:
-            background_tasks[doc_id]["status"] = "stopped"
+    with _lock:
+        if doc_id in stop_events:
+            stop_events[doc_id].set()
+            if doc_id in background_tasks:
+                background_tasks[doc_id]["status"] = "stopped"

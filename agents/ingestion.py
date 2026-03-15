@@ -22,6 +22,11 @@ from core.database import SessionLocal, ContentChunk, Document as DBDocument
 
 logger = logging.getLogger(__name__)
 
+# Point pytesseract at the Windows installer path if tesseract isn't on PATH
+_TESSERACT_WIN = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+if os.path.exists(_TESSERACT_WIN):
+    pytesseract.pytesseract.tesseract_cmd = _TESSERACT_WIN
+
 class IngestionAgent:
     def __init__(self):
         # Using OpenAI embeddings for standard text chunking

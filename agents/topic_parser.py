@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 _EXTRACT_PROMPT = (
     "Extract a clean list of topics/subjects from the following text.\n"
     "Return ONLY a valid JSON array of strings, deduplicated, max 50 items.\n"
-    "Normalize topic names (title case, remove duplicates/near-duplicates).\n"
+    "PRESERVE the original casing of technically significant terms (e.g., 'ANN', 'ML').\n"
+    "Normalize other names only for consistency if needed, but do not force Title Case on abbreviations.\n"
     "Text: {text}"
 )
 

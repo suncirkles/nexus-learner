@@ -7,15 +7,22 @@ database, and supports flashcard recreation based on mentor feedback.
 Also provides LLM-suggested answers for the review workflow.
 """
 
+import logging
+from typing import List, Dict, Any
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from core.models import get_llm
 from core.database import SessionLocal, Flashcard, ContentChunk
 from core.config import settings
 
-class FlashcardOutput(BaseModel):
+logger = logging.getLogger(__name__)
+
+class FlashcardItem(BaseModel):
     question: str = Field(description="The active recall question based on the text.")
     answer: str = Field(description="The precise answer found in the text.")
+
+class FlashcardOutput(BaseModel):
+    flashcards: List[FlashcardItem] = Field(description="List of one or more active recall flashcards.")
 
 class SocraticAgent:
     def __init__(self):
@@ -24,47 +31,53 @@ class SocraticAgent:
         
         # Guardrails enforced via prompt engineering
         self.prompt = ChatPromptTemplate.from_messages([
-             ("system", """You are an expert educator. Your goal is to generate a SINGLE high-quality 'Active Recall' question and answer pair based STRICTLY on the provided source text. 
+             ("system", """You are an expert educator. Your goal is to generate high-quality 'Active Recall' flashcards (Q&A pairs) based STRICTLY on the provided source text. 
              
              CRITICAL GUIDELINES:
-             1. Focus ONLY on 'Essential Concepts', 'High-Impact Knowledge', or 'Core Definitions'. 
-             2. DO NOT generate questions for trivial details, examples, or filler text.
-             3. If the text does not contain a significant, testable concept, return 'Not enough info' for both fields.
-             4. The question should be challenging and promote deep understanding (Active Recall)."""),
+             1. Focus on 'Essential Concepts', 'High-Impact Knowledge', or 'Core Definitions'. 
+             2. Generate BETWEEN 1 and 3 questions per chunk if the content is rich. Ensure they do not overlap.
+             3. If the text does not contain any significant, testable concepts, return an empty list of flashcards.
+             4. Questions should be challenging and promote deep understanding (Active Recall)."""),
              ("user", "Source text:\n\n{text}")
          ])
          
         self.chain = self.prompt | self.llm.with_structured_output(FlashcardOutput)
 
-    def generate_flashcard(self, doc_id: str, chunk: ContentChunk, subtopic_id: int = None) -> dict:
+    def generate_flashcard(self, doc_id: str, chunk: ContentChunk, subtopic_id: int = None, subject_id: int = None) -> dict:
         """Generates a flashcard based on a chunk and stages it to the database."""
-        
-        # Generate Q&A
+
+        # Generate Q&As
         result = self.chain.invoke({"text": chunk.page_content if hasattr(chunk, 'page_content') else str(chunk)})
-        
-        if result.question == "Not enough info":
+
+        if not result.flashcards:
             return {"status": "skipped", "reason": "Insufficient information in chunk."}
 
         # Save to DB with 'pending' or 'approved' state
         db = SessionLocal()
+        saved_cards = []
         try:
              initial_status = "approved" if settings.AUTO_ACCEPT_CONTENT else "pending"
-             fc = Flashcard(
-                 chunk_id=chunk.metadata.get("db_chunk_id") if hasattr(chunk, 'metadata') else None,
-                 subtopic_id=subtopic_id,
-                 question=result.question,
-                 answer=result.answer,
-                 status=initial_status
-             )
-             db.add(fc)
-             db.commit()
-             db.refresh(fc)
+             for card in result.flashcards:
+                 fc = Flashcard(
+                     chunk_id=chunk.metadata.get("db_chunk_id") if hasattr(chunk, 'metadata') else None,
+                     subtopic_id=subtopic_id,
+                     subject_id=subject_id,
+                     question=card.question,
+                     answer=card.answer,
+                     status=initial_status
+                 )
+                 db.add(fc)
+                 db.commit()
+                 db.refresh(fc)
+                 saved_cards.append({
+                     "flashcard_id": fc.id,
+                     "question": fc.question,
+                     "answer": fc.answer
+                 })
              
              return {
                  "status": "success",
-                 "flashcard_id": fc.id,
-                 "question": fc.question,
-                 "answer": fc.answer
+                 "flashcards": saved_cards
              }
         finally:
              db.close()
@@ -87,11 +100,11 @@ class SocraticAgent:
                 1. Address the 'Mentor Feedback' specifically.
                 2. Ensure the new 'Active Recall' question is high-quality and grounded in the source text.
                 3. Return exactly one question and answer pair."""),
-                ("user", f"Source text:\n\n{source_text}\n\nMentor Feedback: {feedback}")
+                ("user", "Source text:\n\n{source_text}\n\nMentor Feedback: {feedback}")
             ])
             
-            recreate_chain = recreate_prompt | self.llm.with_structured_output(FlashcardOutput)
-            result = recreate_chain.invoke({})
+            recreate_chain = recreate_prompt | self.llm.with_structured_output(FlashcardItem)
+            result = recreate_chain.invoke({"source_text": source_text, "feedback": feedback})
             
             # Update the existing flashcard or create a new one? 
             # Request says "recreate", let's update the existing one and move to pending.

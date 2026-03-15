@@ -7,11 +7,14 @@ content into existing Subject hierarchies, avoiding duplicate topics.
 Persists the hierarchy to the relational database.
 """
 
+import logging
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from typing import List
 from core.models import get_llm
 from core.database import SessionLocal, Topic, Subtopic
+
+logger = logging.getLogger(__name__)
 
 class SubtopicStructure(BaseModel):
     name: str = Field(description="Name of the sub-topic or lesson.")
@@ -58,7 +61,11 @@ class CuratorAgent:
         db = SessionLocal()
         existing_structure_text = "No existing topics."
         try:
-            existing_topics = db.query(Topic).filter(Topic.subject_id == subject_id).all()
+            from core.database import SubjectDocumentAssociation
+            # Get existing topics for this subject via all associated documents
+            existing_topics = db.query(Topic).join(SubjectDocumentAssociation, Topic.document_id == SubjectDocumentAssociation.document_id).\
+                filter(SubjectDocumentAssociation.subject_id == subject_id).all()
+            
             if existing_topics:
                 lines = []
                 for t in existing_topics:
@@ -76,15 +83,19 @@ class CuratorAgent:
             topics_data = []
             for t in structure.topics:
                 # Check for existing topic by name (case-insensitive)
+                # Check for existing topic in THIS document or in the subject's hierarchy?
+                # For web research, we create a new document for the topic.
+                # So we want to see if this topic already exists globally or in the subject's view.
+                # In the new global model, topics belong to documents.
+                # If it already exists in the doc, reuse it.
                 db_topic = db.query(Topic).filter(
-                    Topic.subject_id == subject_id,
+                    Topic.document_id == doc_id,
                     Topic.name.ilike(t.name)
                 ).first()
                 
                 if not db_topic:
                     db_topic = Topic(
-                        subject_id=subject_id,
-                        document_id=doc_id, # Link it to the first document that created it
+                        document_id=doc_id,
                         name=t.name,
                         summary=t.summary
                     )

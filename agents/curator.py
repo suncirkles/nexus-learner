@@ -73,7 +73,11 @@ class CuratorAgent:
                     sub_names = ", ".join([s.name for s in subs])
                     lines.append(f"- Topic: {t.name} (Sub-topics: {sub_names})")
                 existing_structure_text = "\n".join(lines)
-            
+            # C11 (defensive): existing_topics ORM objects are no longer accessed beyond this
+            # point — all data has been converted to plain strings in existing_structure_text.
+            # Do NOT access existing_topics after this line to avoid DetachedInstanceError if
+            # the session state changes during the long LLM call below.
+
             analysis_text = full_text[:15000] 
             structure = self.chain.invoke({
                 "content": analysis_text,

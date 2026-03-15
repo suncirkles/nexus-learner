@@ -14,7 +14,7 @@ import os
 import uuid
 import time
 import tempfile
-from core.database import SessionLocal, Subject, Document as DBDocument, Flashcard, ContentChunk, Topic, Subtopic, SubjectDocumentAssociation, Base, engine
+from core.database import SessionLocal, Subject, Document as DBDocument, Flashcard, ContentChunk, Topic, Subtopic, SubjectDocumentAssociation, Base, engine, get_session
 from core.config import settings
 from workflows.phase1_ingestion import phase1_graph
 from sqlalchemy import delete, func
@@ -976,6 +976,15 @@ def _get_flashcard_source_badge(db, fc) -> str:
 
 
 def render_flashcard_review_card(db, fc, current_status):
+    # C1/C2: Capture all display fields as primitives immediately.
+    # Mutations use a fresh session (re-fetch by ID) so this function is safe
+    # even if fc becomes detached after the caller's session closes.
+    fc_id = fc.id
+    fc_question = fc.question
+    fc_answer = fc.answer
+    fc_critic_score = fc.critic_score or 0
+    fc_critic_feedback = fc.critic_feedback or ""
+
     source_badge = _get_flashcard_source_badge(db, fc)
     source_html = (
         f"<div style='margin-top:6px;'>{source_badge}</div>"
@@ -985,69 +994,82 @@ def render_flashcard_review_card(db, fc, current_status):
     <div class='stCard'>
         <div style='display:flex; justify-content:space-between;'>
             <strong>Question:</strong>
-            <span class='critic-score'>Score: {fc.critic_score}/5</span>
+            <span class='critic-score'>Score: {fc_critic_score}/5</span>
         </div>
-        <p>{fc.question}</p>
+        <p>{fc_question}</p>
         <hr style='border-top: 1px solid #30363d; margin: 10px 0;'/>
         <strong>Answer:</strong>
-        <p>{fc.answer}</p>
+        <p>{fc_answer}</p>
         <div style='font-size: 0.85rem; color: #8b949e;'>
-            <em>Critic Feedback: {fc.critic_feedback}</em>
+            <em>Critic Feedback: {fc_critic_feedback}</em>
         </div>
         {source_html}
     </div>
     """, unsafe_allow_html=True)
-    
+
     cols = st.columns([0.15, 0.15, 0.15, 0.55])
-    
+
     if current_status == "pending":
-        if cols[0].button("Approve", key=f"p_app_{fc.id}"):
-            fc.status = "approved"
-            db.commit()
+        if cols[0].button("Approve", key=f"p_app_{fc_id}"):
+            with get_session() as _db:
+                _fc = _db.query(Flashcard).filter(Flashcard.id == fc_id).first()
+                if _fc:
+                    _fc.status = "approved"
+                    _db.commit()
             st.rerun()
-        if cols[1].button("Reject", key=f"p_rej_{fc.id}"):
-            fc.status = "rejected"
-            db.commit()
+        if cols[1].button("Reject", key=f"p_rej_{fc_id}"):
+            with get_session() as _db:
+                _fc = _db.query(Flashcard).filter(Flashcard.id == fc_id).first()
+                if _fc:
+                    _fc.status = "rejected"
+                    _db.commit()
             st.rerun()
     elif current_status == "approved":
-        if cols[0].button("Discard", key=f"a_disc_{fc.id}"):
-            fc.status = "rejected"
-            db.commit()
+        if cols[0].button("Discard", key=f"a_disc_{fc_id}"):
+            with get_session() as _db:
+                _fc = _db.query(Flashcard).filter(Flashcard.id == fc_id).first()
+                if _fc:
+                    _fc.status = "rejected"
+                    _db.commit()
             st.rerun()
     elif current_status == "rejected":
-        if cols[0].button("Restore", key=f"r_res_{fc.id}"):
-            fc.status = "pending"
-            db.commit()
+        if cols[0].button("Restore", key=f"r_res_{fc_id}"):
+            with get_session() as _db:
+                _fc = _db.query(Flashcard).filter(Flashcard.id == fc_id).first()
+                if _fc:
+                    _fc.status = "pending"
+                    _db.commit()
             st.rerun()
-        if cols[1].button("Delete", key=f"r_del_{fc.id}"):
-            db.delete(fc)
-            db.commit()
+        if cols[1].button("Delete", key=f"r_del_{fc_id}"):
+            with get_session() as _db:
+                _fc = _db.query(Flashcard).filter(Flashcard.id == fc_id).first()
+                if _fc:
+                    _db.delete(_fc)
+                    _db.commit()
             st.rerun()
-        
+
         # Recreation form
         with st.expander("🔄 Recreate with Feedback", expanded=False):
-            # Suggested Answer logic
-            feedback_key = f"fb_text_{fc.id}"
+            feedback_key = f"fb_text_{fc_id}"
             if feedback_key not in st.session_state:
                 st.session_state[feedback_key] = ""
-            
-            if st.button("💡 Get Suggested Answer", key=f"get_sug_{fc.id}"):
+
+            if st.button("💡 Get Suggested Answer", key=f"get_sug_{fc_id}"):
                 from agents.socratic import SocraticAgent
                 s_agent = SocraticAgent()
                 with st.spinner("LLM is thinking..."):
-                    suggestion = s_agent.suggest_answer(fc.question, fc.id)
+                    suggestion = s_agent.suggest_answer(fc_question, fc_id)
                     st.session_state[feedback_key] = f"Suggested Answer: {suggestion}"
                     st.rerun()
 
-            feedback = st.text_area("What needs to be fixed?", value=st.session_state[feedback_key], key=f"actual_fb_{fc.id}")
-            if st.button("Regenerate Flashcard", key=f"fb_btn_{fc.id}"):
+            feedback = st.text_area("What needs to be fixed?", value=st.session_state[feedback_key], key=f"actual_fb_{fc_id}")
+            if st.button("Regenerate Flashcard", key=f"fb_btn_{fc_id}"):
                 if feedback:
                     from agents.socratic import SocraticAgent
                     s_agent = SocraticAgent()
                     with st.spinner("Generating better Q&A..."):
-                        res = s_agent.recreate_flashcard(fc.id, feedback)
+                        res = s_agent.recreate_flashcard(fc_id, feedback)
                         if res["status"] == "success":
-                            # Remove from Review Bin immediately by rerunning
                             del st.session_state[feedback_key]
                             st.success("Flashcard updated and moved to Pending.")
                             time.sleep(0.5)

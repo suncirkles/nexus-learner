@@ -1,8 +1,10 @@
 # Nexus Learner — Bug Backlog
 
-> Generated: 2026-03-15
-> Branch: feat/topic-filtering
+> Generated: 2026-03-15 | Last updated: 2026-03-15
+> Branch: feat/topic-filtering → merged to master via feat/fix-review-comments
 > Total: **22 Critical · 28 High · 28 Medium · 2 Low = 80 issues**
+> Fixed: C3 C4 C6 C7 C8 C13 C18 C19 C20 C21 (10 criticals, merged PR #1)
+> Remaining critical: **11** (C1 C2 C5 C9 C10 C11 C12 C14 C15 C16 C17)
 
 ---
 
@@ -12,25 +14,25 @@
 |---|------|-------|
 | C1 | `app.py` | `DetachedInstanceError` in `render_flashcard_review_card` — flashcard `fc` modified after session closed |
 | C2 | `app.py` | Direct model mutation on detached object: `fc.status = "approved"` will fail without re-fetch |
-| C3 | `app.py` | Race condition on `background_tasks` dict — deletion while background thread may be reading |
-| C4 | `core/database.py` | Schema migration runs `ALTER TABLE` without per-statement rollback — partial migrations leave DB in broken state |
+| ~~C3~~ | ~~`app.py`~~ | ~~Race condition on `background_tasks` dict — deletion while background thread may be reading~~ ✅ Fixed PR #1 |
+| ~~C4~~ | ~~`core/database.py`~~ | ~~Schema migration runs `ALTER TABLE` without per-statement rollback — partial migrations leave DB in broken state~~ ✅ Fixed PR #1 |
 | C5 | `core/database.py` | `Flashcard.chunk_id` is nullable but generation logic requires it — allows orphaned flashcards |
-| C6 | `core/background.py` | Race condition: `background_tasks[doc_id]` state update happens outside lock after initial creation |
-| C7 | `core/background.py` | Incomplete state key initialization — missing keys cause `KeyError` when UI reads progress |
-| C8 | `agents/ingestion.py` | Hash collision: SHA256(first 10k chars + basename) — two different PDFs with same intro produce same hash; second PDF silently skipped |
+| ~~C6~~ | ~~`core/background.py`~~ | ~~Race condition: `background_tasks[doc_id]` state update happens outside lock after initial creation~~ ✅ Fixed PR #1 |
+| ~~C7~~ | ~~`core/background.py`~~ | ~~Incomplete state key initialization — missing keys cause `KeyError` when UI reads progress~~ ✅ Fixed PR #1 |
+| ~~C8~~ | ~~`agents/ingestion.py`~~ | ~~Hash collision: SHA256(first 10k chars + basename) — two different PDFs with same intro produce same hash; second PDF silently skipped~~ ✅ Fixed PR #1 |
 | C9 | `agents/ingestion.py` | Session leak — `SessionLocal()` not always closed if exception occurs before `finally` |
 | C10 | `agents/ingestion.py` | `DetachedInstanceError` after `db_chunk` commit — `db_chunk.id` accessed outside session |
 | C11 | `agents/curator.py` | `DetachedInstanceError` — `existing_topics` queried, then subtopics accessed on potentially detached topic objects |
 | C12 | `agents/curator.py` | Multiple inserts without atomic transaction — partial hierarchy left on error |
-| C13 | `agents/socratic.py` | `Flashcard` created without `subject_id` — orphaned flashcards not visible to subject-scoped queries |
+| ~~C13~~ | ~~`agents/socratic.py`~~ | ~~`Flashcard` created without `subject_id` — orphaned flashcards not visible to subject-scoped queries~~ ✅ Fixed PR #1 |
 | C14 | `agents/socratic.py` | `DetachedInstanceError` in `recreate_flashcard` — `fc` from query modified after detachment |
 | C15 | `agents/socratic.py` | `chunk.metadata.get()` assumes LangChain `Document`; fails on `ContentChunk` ORM object from DB |
 | C16 | `workflows/phase1_ingestion.py` | `doc_id` reassigned from `existing_doc.id` on first page but not persisted to state — subsequent pages use wrong ID |
 | C17 | `workflows/phase1_ingestion.py` | `pending_qdrant_docs` not initialized in state — `KeyError` on unexpected routing |
-| C18 | `workflows/phase1_ingestion.py` | `_flush_qdrant_batch` called without Qdrant availability check — hangs thread on connection failure |
-| C19 | `workflows/phase2_web_ingestion.py` | `DetachedInstanceError` in `node_ingest_web_document` — `existing` doc used outside session |
-| C20 | `workflows/phase2_web_ingestion.py` | Chunk/Qdrant split atomicity — chunks written to SQLite but if Qdrant fails they're orphaned (no vectors, no semantic search) |
-| C21 | `workflows/phase2_web_ingestion.py` | Document and `SubjectDocumentAssociation` created in two separate commits — orphaned document if second commit fails |
+| ~~C18~~ | ~~`workflows/phase1_ingestion.py`~~ | ~~`_flush_qdrant_batch` called without Qdrant availability check — hangs thread on connection failure~~ ✅ Fixed PR #1 |
+| ~~C19~~ | ~~`workflows/phase2_web_ingestion.py`~~ | ~~`DetachedInstanceError` in `node_ingest_web_document` — `existing` doc used outside session~~ ✅ Fixed PR #1 |
+| ~~C20~~ | ~~`workflows/phase2_web_ingestion.py`~~ | ~~Chunk/Qdrant split atomicity — chunks written to SQLite but if Qdrant fails they're orphaned (no vectors, no semantic search)~~ ✅ Fixed PR #1 |
+| ~~C21~~ | ~~`workflows/phase2_web_ingestion.py`~~ | ~~Document and `SubjectDocumentAssociation` created in two separate commits — orphaned document if second commit fails~~ ✅ Fixed PR #1 |
 | C22 | `agents/critic.py` | *(re-numbered — see H17/H18)* |
 
 ---

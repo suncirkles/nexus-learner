@@ -43,11 +43,30 @@ class SocraticAgent:
          
         self.chain = self.prompt | self.llm.with_structured_output(FlashcardOutput)
 
-    def generate_flashcard(self, doc_id: str, chunk: ContentChunk, subtopic_id: int = None, subject_id: int = None) -> dict:
-        """Generates a flashcard based on a chunk and stages it to the database."""
+    def generate_flashcard(self, doc_id: str, chunk, subtopic_id: int = None, subject_id: int = None) -> dict:
+        """Generates a flashcard based on a chunk and stages it to the database.
 
-        # Generate Q&As
-        result = self.chain.invoke({"text": chunk.page_content if hasattr(chunk, 'page_content') else str(chunk)})
+        ``chunk`` may be either a LangChain ``Document`` (has ``page_content`` and
+        ``metadata`` dict) or a SQLAlchemy ``ContentChunk`` ORM object (has ``text``
+        and ``id``).  We resolve both to plain primitives here so the rest of the
+        method is type-agnostic.
+        """
+        # C15: resolve source text and chunk_id regardless of chunk type
+        if hasattr(chunk, 'page_content'):  # LangChain Document
+            source_text = chunk.page_content
+            chunk_id = chunk.metadata.get("db_chunk_id") if isinstance(getattr(chunk, 'metadata', None), dict) else None
+        else:  # ORM ContentChunk
+            source_text = chunk.text
+            chunk_id = chunk.id
+
+        # C5: warn when chunk_id is missing — flashcard will have no source traceability
+        if chunk_id is None:
+            logger.warning(
+                "generate_flashcard: chunk_id is None for doc %s — flashcard will lack source traceability",
+                doc_id,
+            )
+
+        result = self.chain.invoke({"text": source_text})
 
         if not result.flashcards:
             return {"status": "skipped", "reason": "Insufficient information in chunk."}
@@ -59,7 +78,7 @@ class SocraticAgent:
              initial_status = "approved" if settings.AUTO_ACCEPT_CONTENT else "pending"
              for card in result.flashcards:
                  fc = Flashcard(
-                     chunk_id=chunk.metadata.get("db_chunk_id") if hasattr(chunk, 'metadata') else None,
+                     chunk_id=chunk_id,
                      subtopic_id=subtopic_id,
                      subject_id=subject_id,
                      question=card.question,
@@ -112,13 +131,19 @@ class SocraticAgent:
             fc.answer = result.answer
             fc.mentor_feedback = feedback
             fc.status = "pending"
+
+            # C14: capture primitives before commit — commit expires ORM attributes,
+            # triggering unnecessary lazy reloads on access in the return dict.
+            new_question = fc.question
+            new_answer = fc.answer
+            fc_id = fc.id
             db.commit()
-            
+
             return {
                 "status": "success",
-                "flashcard_id": fc.id,
-                "question": fc.question,
-                "answer": fc.answer
+                "flashcard_id": fc_id,
+                "question": new_question,
+                "answer": new_answer,
             }
         finally:
             db.close()

@@ -199,7 +199,9 @@ def run_web_research_background(
 
             elif node_name == "generate":
                 flashcards = node_data.get("generated_flashcards") or []
-                successful = sum(1 for f in flashcards if f.get("status") == "success")
+                # H28: generated_flashcards is a list of card dicts (flashcard_id, question,
+                # answer) — they have no "status" key. Count by presence of flashcard_id.
+                successful = sum(1 for f in flashcards if f.get("flashcard_id") is not None)
                 with _lock:
                     background_tasks[task_id]["flashcards_count"] = successful
 

@@ -24,7 +24,7 @@ setup_logging()
 from core.database import SessionLocal, Subject, Document as DBDocument, Flashcard, ContentChunk, Topic, Subtopic, SubjectDocumentAssociation, Base, engine, get_session
 from core.config import settings
 from workflows.phase1_ingestion import phase1_graph
-from sqlalchemy import delete, func
+from sqlalchemy import delete, func, update as sa_update
 from qdrant_client import QdrantClient
 
 # Configure Page
@@ -127,9 +127,34 @@ def delete_topic_data(topic_id: int, document_id: str):
     try:
         subtopics = db.query(Subtopic).filter(Subtopic.topic_id == topic_id).all()
         subtopic_ids = [s.id for s in subtopics]
-        
-        # SQL Cleanup
-        db.execute(delete(Flashcard).where(Flashcard.subtopic_id.in_(subtopic_ids)))
+
+        if subtopic_ids:
+            # H6: preserve approved flashcards — nullify their subtopic link instead of
+            # silently deleting them. The card still belongs to its Subject and stays
+            # available for study; it just loses its category tag.
+            approved_count = db.query(Flashcard).filter(
+                Flashcard.subtopic_id.in_(subtopic_ids),
+                Flashcard.status == "approved",
+            ).count()
+            if approved_count > 0:
+                db.execute(
+                    sa_update(Flashcard)
+                    .where(Flashcard.subtopic_id.in_(subtopic_ids), Flashcard.status == "approved")
+                    .values(subtopic_id=None),
+                    execution_options={"synchronize_session": False},
+                )
+                logger.info(
+                    "Topic %d deletion: preserved %d approved flashcard(s) by unlinking subtopic",
+                    topic_id, approved_count,
+                )
+            # Delete only non-approved flashcards (pending/rejected) for this topic
+            db.execute(
+                delete(Flashcard).where(
+                    Flashcard.subtopic_id.in_(subtopic_ids),
+                    Flashcard.status != "approved",
+                )
+            )
+
         db.execute(delete(Subtopic).where(Subtopic.topic_id == topic_id))
         db.execute(delete(Topic).where(Topic.id == topic_id))
         db.execute(delete(ContentChunk).where(ContentChunk.document_id == document_id))
@@ -488,7 +513,25 @@ def render_knowledge_library():
                             st.write(", ".join([t.name for t in topics]))
                         
                         if st.button("🗑️ Delete from Library", key=f"del_lib_{doc.id}"):
-                            db.delete(doc) # Cascade should handle chunks/topics
+                            # H1: delete Qdrant vectors BEFORE the DB record so no
+                            # orphaned embeddings linger in the vector store.
+                            try:
+                                from qdrant_client.http import models as rest
+                                qdrant_client.delete(
+                                    collection_name=settings.QDRANT_COLLECTION_NAME,
+                                    points_selector=rest.FilterSelector(
+                                        filter=rest.Filter(
+                                            must=[rest.FieldCondition(
+                                                key="document_id",
+                                                match=rest.MatchValue(value=doc.id),
+                                            )]
+                                        )
+                                    ),
+                                )
+                            except Exception as qe:
+                                logger.warning("Qdrant cleanup failed for doc %s: %s", doc.id, qe)
+                                st.warning(f"Vector cleanup failed ({qe}) — DB record will still be removed.")
+                            db.delete(doc)  # ORM cascade handles chunks/topics/flashcards
                             db.commit()
                             st.rerun()
 
@@ -990,6 +1033,12 @@ def render_flashcard_review_card(db, fc, current_status):
     fc_answer = fc.answer
     fc_critic_score = fc.critic_score or 0
     fc_critic_feedback = fc.critic_feedback or ""
+    # H16: surface low-quality auto-accepted cards so mentors can spot them
+    score_label = (
+        f"⚠️ {fc_critic_score}/5 low quality"
+        if fc_critic_score and fc_critic_score < 3
+        else f"{fc_critic_score}/5"
+    )
 
     source_badge = _get_flashcard_source_badge(db, fc)
     source_html = (
@@ -1000,7 +1049,7 @@ def render_flashcard_review_card(db, fc, current_status):
     <div class='stCard'>
         <div style='display:flex; justify-content:space-between;'>
             <strong>Question:</strong>
-            <span class='critic-score'>Score: {fc_critic_score}/5</span>
+            <span class='critic-score'>Score: {score_label}</span>
         </div>
         <p>{fc_question}</p>
         <hr style='border-top: 1px solid #30363d; margin: 10px 0;'/>

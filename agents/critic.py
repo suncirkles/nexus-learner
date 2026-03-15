@@ -6,10 +6,13 @@ comparing the question and answer against the original source text.
 Auto-rejects severely hallucinated content (score < 3).
 """
 
+import logging
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from core.models import get_llm
 from core.database import SessionLocal, Flashcard
+
+logger = logging.getLogger(__name__)
 
 class GroundingEvaluation(BaseModel):
     score: int = Field(description="Score from 1 to 5. 5 means completely accurate and grounded in source text. 1 means hallucinated or completely incorrect.", ge=1, le=5)

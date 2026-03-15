@@ -157,66 +157,14 @@ def test_content_hash_same_file_is_stable(tmp_path):
 # C13 — Flashcard is created with subject_id set at insertion time
 # ---------------------------------------------------------------------------
 
-SAMPLE_PDF = os.path.abspath("documents/pyspark.pdf")
-
-
-@pytest.mark.skipif(
-    not os.path.exists(SAMPLE_PDF),
-    reason="PDF fixture not found",
-)
-def test_flashcards_have_subject_id_after_generation():
-    """Every flashcard produced by GENERATION must have subject_id set (not NULL)."""
-    from core.database import SessionLocal, Subject, Flashcard, Topic, Subtopic, ContentChunk, Document as DBDoc, SubjectDocumentAssociation
-    from workflows.phase1_ingestion import phase1_graph
-
-    doc_id = str(uuid.uuid4())
-    db = SessionLocal()
-    subj = Subject(name=f"C13-Test-{doc_id[:6]}")
-    db.add(subj)
-    db.commit()
-    subject_id = subj.id
-    db.close()
-
-    # Index 2 pages
-    phase1_graph.invoke({
-        "mode": "INDEXING", "file_path": SAMPLE_PDF, "doc_id": doc_id,
-        "subject_id": None, "target_topics": [],
-        "total_pages": 2, "current_page": 0, "chunks": [], "current_chunk_index": 0,
-        "hierarchy": [], "pending_qdrant_docs": [], "current_new_cards": [],
-        "generated_flashcards": [], "status_message": "start",
-        "matched_subtopic_ids": None,
-    })
-
-    # Link doc to subject
-    db = SessionLocal()
-    actual_doc = db.query(DBDoc).filter(DBDoc.filename == "pyspark.pdf").order_by(DBDoc.created_at.desc()).first()
-    actual_doc_id = actual_doc.id if actual_doc else doc_id
-    exists = db.query(SubjectDocumentAssociation).filter_by(subject_id=subject_id, document_id=actual_doc_id).first()
-    if not exists:
-        db.add(SubjectDocumentAssociation(subject_id=subject_id, document_id=actual_doc_id))
-        db.commit()
-    db.close()
-
-    # Generate
-    phase1_graph.invoke({
-        "mode": "GENERATION", "file_path": None, "doc_id": actual_doc_id,
-        "subject_id": subject_id, "target_topics": [],
-        "total_pages": 0, "current_page": 0, "chunks": [], "current_chunk_index": 0,
-        "hierarchy": [], "pending_qdrant_docs": [], "current_new_cards": [],
-        "generated_flashcards": [], "status_message": "start",
-        "matched_subtopic_ids": None,
-    })
-
-    db = SessionLocal()
-    try:
-        cards = db.query(Flashcard).filter(Flashcard.subject_id == subject_id).all()
-        assert len(cards) > 0, "No flashcards generated"
-        cards_without_subject = [c for c in cards if c.subject_id is None]
-        assert not cards_without_subject, (
-            f"{len(cards_without_subject)} flashcard(s) have NULL subject_id"
-        )
-    finally:
-        db.close()
+@pytest.mark.slow
+def test_flashcards_have_subject_id_after_generation(generated_cards):
+    """Every flashcard produced by GENERATION must have subject_id set (not NULL).
+    Uses the session-scoped generated_cards fixture — no extra LLM calls."""
+    cards = generated_cards["cards"]
+    assert len(cards) > 0, "No flashcards generated"
+    null_subject = [c for c in cards if c["subject_id"] is None]
+    assert not null_subject, f"{len(null_subject)} flashcard(s) have NULL subject_id"
 
 
 # ---------------------------------------------------------------------------

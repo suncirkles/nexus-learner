@@ -18,8 +18,6 @@ import logging
 import os
 import uuid as _uuid
 
-# Setup Logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # 1. Define the State
@@ -221,10 +219,12 @@ def node_ingest(state: GraphState):
 
             chunks_to_process = []
             for c in db_chunks:
-                # Skip subtopics that already have cards for this subject (incremental)
+                # H22: only skip subtopics with approved/pending cards — if mentor rejected
+                # all cards for a subtopic, allow re-generation so gaps can be filled.
                 already_has_cards = db.query(Flashcard).filter(
                     Flashcard.subject_id == state["subject_id"],
                     Flashcard.subtopic_id == c.subtopic_id,
+                    Flashcard.status.in_(["approved", "pending"]),
                 ).count() > 0
                 if already_has_cards:
                     continue

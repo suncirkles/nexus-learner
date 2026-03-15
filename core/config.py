@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     # Application State
     AUTO_ACCEPT_CONTENT: bool = False  # If True, bypasses Mentor Review flag
 
+    # Logging
+    LOG_LEVEL: str = "INFO"           # DEBUG | INFO | WARNING | ERROR | CRITICAL
+    LOG_DIR: str = "logs"             # Directory for log files (relative to project root)
+    LOG_FILE: str = "nexus_learner.log"
+    LOG_MAX_BYTES: int = 10_485_760   # 10 MB per file
+    LOG_BACKUP_COUNT: int = 5         # Keep 5 rotated files
+
     # Web Scraping Settings
     WEB_SCRAPE_TIMEOUT: int = 10            # HTTP request timeout seconds
     WEB_MAX_PAGES_PER_TOPIC: int = 3        # Max pages to scrape per topic

@@ -14,18 +14,22 @@ import os
 import uuid
 import time
 import tempfile
+import logging
+
+# Logging must be configured before any other local imports so every module
+# that calls logging.getLogger(__name__) at import time inherits the setup.
+from core.logging_config import setup_logging
+setup_logging()
+
 from core.database import SessionLocal, Subject, Document as DBDocument, Flashcard, ContentChunk, Topic, Subtopic, SubjectDocumentAssociation, Base, engine, get_session
 from core.config import settings
 from workflows.phase1_ingestion import phase1_graph
 from sqlalchemy import delete, func
 from qdrant_client import QdrantClient
-import logging
 
 # Configure Page
 st.set_page_config(page_title="Nexus Learner - Agentic Learning Platform", layout="wide", page_icon="🎓")
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 # Initialize Qdrant Client for admin tasks
@@ -782,11 +786,13 @@ def render_study_materials():
         db.close()
 
     # Background Monitor
-    from core.background import background_tasks, stop_background_task, clear_background_task
-    if background_tasks:
+    from core.background import background_tasks, stop_background_task, clear_background_task, _lock as _bg_lock
+    with _bg_lock:
+        tasks_snapshot = dict(background_tasks)  # H2: snapshot under lock to avoid concurrent modification
+    if tasks_snapshot:
         st.divider()
         st.subheader("⚙️ Active Background Tasks")
-        for d_id, task in list(background_tasks.items()):
+        for d_id, task in tasks_snapshot.items():
             is_web = task.get("is_web", False)
             display_name = task.get("display_name") or task.get("filename") or d_id[:8]
 
@@ -896,11 +902,11 @@ def render_mentor_review():
                                             st.markdown(f"#### 📖 {sub.name} ({len(pending_fcs)} Pending)")
                                             b_col1, b_col2, _ = st.columns([0.2, 0.2, 0.6])
                                             if b_col1.button("✅ Approve All", key=f"app_all_{sub.id}"):
-                                                db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").update({"status": "approved"})
+                                                db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").update({"status": "approved"}, synchronize_session=False)
                                                 db.commit()
                                                 st.rerun()
                                             if b_col2.button("❌ Reject All", key=f"rej_all_{sub.id}"):
-                                                db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").update({"status": "rejected"})
+                                                db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").update({"status": "rejected"}, synchronize_session=False)
                                                 db.commit()
                                                 st.rerun()
 
@@ -1299,11 +1305,12 @@ def main():
         st.session_state.active_nav = active_nav
 
     # --- Active Background Processes UI ---
-    from core.background import background_tasks, stop_background_task
-    
+    from core.background import background_tasks, stop_background_task, _lock as _bg_lock2
+
     @st.fragment(run_every=3) # Refresh every 3 seconds if active
     def render_background_monitor():
-        active_tasks = {id: task for id, task in background_tasks.items() if task["status"] in ["processing", "failed"]}
+        with _bg_lock2:
+            active_tasks = {id: task for id, task in background_tasks.items() if task.get("status") in ["processing", "failed"]}  # H2: snapshot under lock
         if active_tasks:
             st.divider()
             st.subheader("⏳ Background Processes")

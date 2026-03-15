@@ -218,29 +218,42 @@ def node_ingest_web_document(state: GraphState) -> dict:
 
     doc_id = str(uuid.uuid4())
 
-    # --- Duplicate detection ---
+    # --- Duplicate detection + document creation (single atomic commit) ---
     db = SessionLocal()
     try:
+        from core.database import SubjectDocumentAssociation
         existing = db.query(DBDocument).filter(DBDocument.content_hash == content_hash).first()
+
         if existing:
-            logger.info("Duplicate content skipped (already ingested as '%s').", existing.filename)
+            # C19: read id into plain string before session closes
+            existing_doc_id = str(existing.id)
+            logger.info("Duplicate content found (previously ingested as '%s').", existing.filename)
+            existing_assoc = db.query(SubjectDocumentAssociation).filter(
+                SubjectDocumentAssociation.subject_id == subject_id,
+                SubjectDocumentAssociation.document_id == existing_doc_id,
+            ).first()
+            if not existing_assoc:
+                db.add(SubjectDocumentAssociation(subject_id=subject_id, document_id=existing_doc_id))
+                db.commit()
+                logger.info("Added new association for existing document to subject %d", subject_id)
+
             if cb:
-                cb(f"Skipped duplicate: {url}")
-            # Still need to advance — return empty chunks so generate/critic are skipped
+                cb(f"Re-using existing content: {url}")
+
             return {
-                "doc_id": doc_id,
+                "doc_id": existing_doc_id,
                 "full_text": "",
                 "chunks": [],
                 "hierarchy": state.get("hierarchy", []),
                 "doc_summary": state.get("doc_summary", ""),
                 "current_chunk_index": 0,
                 "generated_flashcards": state.get("generated_flashcards", []),
-                "status_message": f"Skipped duplicate: {title}",
+                "status_message": f"Using existing content: {title}",
             }
 
+        # C21: create document + association in one commit so neither is orphaned
         new_doc = DBDocument(
             id=doc_id,
-            subject_id=subject_id,
             filename=title,
             title=title,
             content_hash=content_hash,
@@ -248,6 +261,7 @@ def node_ingest_web_document(state: GraphState) -> dict:
             source_url=url,
         )
         db.add(new_doc)
+        db.add(SubjectDocumentAssociation(subject_id=subject_id, document_id=doc_id))
         db.commit()
     except Exception as exc:
         db.rollback()
@@ -296,6 +310,7 @@ def node_ingest_web_document(state: GraphState) -> dict:
         lc_documents.append(lc_doc)
 
     # --- Embed into Qdrant ---
+    # C20: if Qdrant fails, log clearly so caller knows chunks exist in SQLite but have no vectors
     try:
         QdrantVectorStore.from_documents(
             lc_documents,
@@ -304,8 +319,10 @@ def node_ingest_web_document(state: GraphState) -> dict:
             collection_name=settings.QDRANT_COLLECTION_NAME,
         )
     except Exception as exc:
-        logger.error("Qdrant embedding failed for '%s': %s", url, exc)
-        # Non-fatal — flashcards can still be generated from relational chunks
+        logger.error(
+            "Qdrant embedding failed for '%s' (%d chunks persisted in SQLite but NOT vectorised): %s",
+            url, len(lc_documents), exc,
+        )
 
     tracked_urls = list(state.get("processed_urls") or [])
     tracked_urls.append(url)

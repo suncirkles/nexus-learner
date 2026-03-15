@@ -14,14 +14,19 @@ import os
 import uuid
 import time
 import tempfile
-from core.database import SessionLocal, Subject, Document as DBDocument, Flashcard, ContentChunk, Topic, Subtopic, Base, engine
+from core.database import SessionLocal, Subject, Document as DBDocument, Flashcard, ContentChunk, Topic, Subtopic, SubjectDocumentAssociation, Base, engine
 from core.config import settings
 from workflows.phase1_ingestion import phase1_graph
 from sqlalchemy import delete, func
 from qdrant_client import QdrantClient
+import logging
 
 # Configure Page
 st.set_page_config(page_title="Nexus Learner - Agentic Learning Platform", layout="wide", page_icon="🎓")
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
 
 # Initialize Qdrant Client for admin tasks
 qdrant_client = QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY)
@@ -100,16 +105,14 @@ st.markdown("""
 
 def reset_entire_system():
     """Wipes SQLite and Qdrant Collection."""
-    # 1. Clear SQLite
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    
-    # 2. Clear Qdrant
+
     try:
         qdrant_client.delete_collection(collection_name=settings.QDRANT_COLLECTION_NAME)
     except Exception as e:
         st.error(f"Failed to clear Qdrant: {e}")
-    
+
     st.success("System completely reset!")
     time.sleep(1)
     st.rerun()
@@ -205,6 +208,75 @@ def render_flashcard_list(sub_id, status="approved"):
     finally:
         db.close()
 
+def _render_topic_input_section(subject_id: int, suffix: str):
+    """Reusable UI component for topic input (type or upload)."""
+    st.markdown("#### Topic Input")
+    
+    # We use a unique key per subject to allow switching without losing data
+    topics_key = f"parsed_topics_{subject_id}"
+    if topics_key not in st.session_state:
+        st.session_state[topics_key] = []
+
+    input_mode = st.radio(
+        "How would you like to provide topics?",
+        ["✏️ Type topics", "📄 Upload topic file"],
+        horizontal=True,
+        key=f"input_mode_{subject_id}_{suffix}",
+    )
+
+    if input_mode == "✏️ Type topics":
+        topic_text = st.text_area(
+            "Enter topics (one per line, or separated by commas)",
+            height=150,
+            key=f"topic_text_{subject_id}_{suffix}",
+            placeholder="e.g.\nBinary Search Trees\nGraph Traversal Algorithms\nDynamic Programming",
+        )
+        if st.button("Parse Topics", key=f"btn_parse_text_{subject_id}_{suffix}"):
+            if topic_text.strip():
+                with st.spinner("Parsing topics..."):
+                    from agents.topic_parser import TopicParserAgent
+                    parser = TopicParserAgent()
+                    st.session_state[topics_key] = parser.parse_topics_from_text(topic_text)
+                st.rerun()
+            else:
+                st.warning("Please enter some topics first.")
+
+    else:  # Upload topic file
+        topic_file = st.file_uploader(
+            "Upload .txt, .pdf, or .docx",
+            type=["txt", "pdf", "docx"],
+            key=f"topic_file_{subject_id}_{suffix}",
+        )
+        if topic_file and st.button("Parse Topics from File", key=f"btn_parse_file_{subject_id}_{suffix}"):
+            suffix_ext = os.path.splitext(topic_file.name)[1].lstrip(".")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{suffix_ext}") as tmp:
+                tmp.write(topic_file.getbuffer())
+                tmp_path = tmp.name
+            try:
+                with st.spinner("Extracting and parsing topics..."):
+                    from agents.topic_parser import TopicParserAgent
+                    parser = TopicParserAgent()
+                    st.session_state[topics_key] = parser.parse_topics_from_file(tmp_path, suffix_ext)
+                st.rerun()
+            finally:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+    # Preview with removal
+    parsed_topics = st.session_state[topics_key]
+    if parsed_topics:
+        with st.expander(f"📋 Topics identified ({len(parsed_topics)})", expanded=True):
+            to_remove = []
+            for i, topic in enumerate(parsed_topics):
+                col_t, col_x = st.columns([0.9, 0.1])
+                col_t.markdown(f"- {topic}")
+                if col_x.button("✕", key=f"rm_topic_{subject_id}_{i}_{suffix}"):
+                    to_remove.append(i)
+            if to_remove:
+                st.session_state[topics_key] = [t for j, t in enumerate(parsed_topics) if j not in to_remove]
+                st.rerun()
+    return st.session_state[topics_key]
+
 # --- Tab Renderers ---
 
 def render_dashboard():
@@ -224,16 +296,18 @@ def render_dashboard():
             st.subheader("📚 My Subjects")
             
             from sqlalchemy import case, Integer
-            # Pre-calculate topic counts for all subjects
-            topic_counts_raw = db.query(Topic.subject_id, func.count(Topic.id)).group_by(Topic.subject_id).all()
+            # Pre-calculate topic counts using the bridge table
+            topic_counts_raw = db.query(SubjectDocumentAssociation.subject_id, func.count(Topic.id)).\
+                join(Topic, SubjectDocumentAssociation.document_id == Topic.document_id).\
+                group_by(SubjectDocumentAssociation.subject_id).all()
             topic_counts = {r[0]: r[1] for r in topic_counts_raw}
             
-            # Pre-calculate flashcard stats for all subjects using JOINs
+            # Pre-calculate flashcard stats (Flashcards are now directly linked to subjects)
             fc_stats_raw = db.query(
-                Topic.subject_id,
+                Flashcard.subject_id,
                 func.sum(case((Flashcard.status == 'approved', 1), else_=0)).cast(Integer),
                 func.sum(case((Flashcard.status == 'pending', 1), else_=0)).cast(Integer)
-            ).select_from(Topic).join(Subtopic, Topic.id == Subtopic.topic_id).join(Flashcard, Subtopic.id == Flashcard.subtopic_id).group_by(Topic.subject_id).all()
+            ).group_by(Flashcard.subject_id).all()
             
             fc_stats = {r[0]: {"approved": r[1] or 0, "pending": r[2] or 0} for r in fc_stats_raw}
             
@@ -295,148 +369,161 @@ def render_dashboard():
         db.close()
 
 def _render_upload_tab(db, subject_id: int, subject_name: str):
-    """Tab 1: existing PDF / Image upload flow — completely unchanged in behaviour."""
-    with st.expander("📥 Click to Upload PDF or Image", expanded=True):
-        uploaded_file = st.file_uploader("Upload File", type=["pdf", "png", "jpg", "jpeg"])
-        if uploaded_file:
-            if uploaded_file.size > 50 * 1024 * 1024:
-                st.error("File exceeds the 50MB limit (50MB max).")
-                uploaded_file = None
+    """Refactored Tab 1: Knowledge Library Attachment and Generation."""
+    
+    st.markdown("#### 🔗 Attached Library Documents")
+    # Get associated documents
+    doc_associations = db.query(SubjectDocumentAssociation).filter(SubjectDocumentAssociation.subject_id == subject_id).all()
+    attached_doc_ids = [a.document_id for a in doc_associations]
+    attached_docs = db.query(DBDocument).filter(DBDocument.id.in_(attached_doc_ids)).all() if attached_doc_ids else []
+
+    if not attached_docs:
+        st.info("No documents attached to this subject yet.")
+    else:
+        for doc in attached_docs:
+            col1, col2 = st.columns([0.8, 0.2])
+            topic_count = db.query(Topic).filter(Topic.document_id == doc.id).count()
+            col1.markdown(f"- **{doc.title or doc.filename}** ({topic_count} topics indexed)")
+            if col2.button("🗑️ Detach", key=f"detach_{subject_id}_{doc.id}"):
+                db.query(SubjectDocumentAssociation).filter(
+                    SubjectDocumentAssociation.subject_id == subject_id,
+                    SubjectDocumentAssociation.document_id == doc.id
+                ).delete()
+                db.commit()
+                st.rerun()
+
+    st.divider()
+
+    # 2. Attach from Library
+    st.markdown("#### ➕ Attach from Library")
+    # All docs NOT attached to this subject
+    available_docs = db.query(DBDocument).filter(~DBDocument.id.in_(attached_doc_ids)).all() if attached_doc_ids else db.query(DBDocument).all()
+    
+    if not available_docs:
+        st.caption("No new documents available in library. Index them in the '📂 Knowledge Library' tab.")
+    else:
+        doc_options = {f"{d.title or d.filename}": d.id for d in available_docs}
+        selected_doc_name = st.selectbox("Select document to attach:", [""] + list(doc_options.keys()), key=f"lib_attach_{subject_id}")
+        if selected_doc_name:
+            if st.button("Link to Subject", key=f"btn_link_{subject_id}"):
+                new_assoc = SubjectDocumentAssociation(subject_id=subject_id, document_id=doc_options[selected_doc_name])
+                db.add(new_assoc)
+                db.commit()
+                st.success("Document attached!")
+                st.rerun()
+
+    st.divider()
+
+    # 3. Targeted Generation
+    st.markdown("#### 🧠 Generate Flashcards")
+    
+    # Get all subtopics for attached documents
+    all_subtopics = db.query(Subtopic).join(Topic).filter(Topic.document_id.in_(attached_doc_ids)).all() if attached_doc_ids else []
+    topic_list = list(set([s.topic.name for s in all_subtopics])) if all_subtopics else []
+    
+    if not topic_list:
+        st.warning("Attach a document with indexed topics first.")
+    else:
+        st.caption("Select specific topics to generate cards for this subject.")
+        selected_topics = st.multiselect("Select Topics:", topic_list, key=f"gen_topics_{subject_id}")
+        
+        # Also allow manual text input for similarity matching
+        manual_topics = st.text_input("OR Enter topics manually (comma separated):", key=f"manual_topics_{subject_id}")
+        
+        if st.button("🔥 Process and Generate Cards", key=f"btn_gen_{subject_id}"):
+            final_target_topics = selected_topics
+            if manual_topics:
+                final_target_topics += [t.strip() for t in manual_topics.split(",") if t.strip()]
+
+            if not final_target_topics:
+                st.warning("Please select or enter at least one topic.")
             else:
-                st.success(f"File selected: {uploaded_file.name}")
-        if uploaded_file and st.button("🚀 Process & Generate Hierarchy"):
-            doc_id = str(uuid.uuid4())
-            safe_filename = "".join(c for c in uploaded_file.name if c.isalnum() or c in " ._-").strip()
-            os.makedirs("temp_uploads", exist_ok=True)
-            file_path = os.path.join("temp_uploads", f"{doc_id}_{safe_filename}")
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
+                from core.background import start_background_task
+                for doc in attached_docs:
+                    gen_id = str(uuid.uuid4())
+                    state = {
+                        "mode": "GENERATION",
+                        "doc_id": doc.id,
+                        "subject_id": subject_id,
+                        "target_topics": final_target_topics,
+                        "chunks": [],
+                        "current_chunk_index": 0,
+                        "generated_flashcards": [],
+                        "status_message": "Matching topics and identifying chunks...",
+                    }
+                    label = doc.title or doc.filename
+                    start_background_task(
+                        state, gen_id,
+                        filename=f"Gen ({label}): {', '.join(final_target_topics[:2])}...",
+                    )
+                st.toast(f"Flashcard generation started for {len(attached_docs)} document(s).")
+                st.rerun()
 
-            progress_bar = st.progress(0, text="Initializing...")
+def render_knowledge_library():
+    """Centralized management for indexed documents."""
+    st.header("📂 Knowledge Library")
+    st.markdown("Upload and index documents once to make them available across all subjects.")
 
-            state = {
-                "file_path": file_path,
-                "doc_id": doc_id,
-                "subject_id": subject_id,
-                "chunks": [],
-                "hierarchy": [],
-                "doc_summary": "",
-                "current_chunk_index": 0,
-                "generated_flashcards": [],
-                "status_message": "Starting ingestion..."
-            }
+    from core.database import SessionLocal, Document as LibDoc, Topic as LibTopic
+    db = SessionLocal()
+    try:
+        col_main, col_sidebar = st.columns([0.7, 0.3])
+        
+        with col_main:
+            st.subheader("📑 Processed Documents")
+            all_docs = db.query(LibDoc).order_by(LibDoc.created_at.desc()).all()
+            if not all_docs:
+                st.info("The library is empty. Upload a document to start.")
+            else:
+                for doc in all_docs:
+                    with st.expander(f"📄 {doc.title or doc.filename}"):
+                        st.caption(f"Indexed on: {doc.created_at.strftime('%Y-%m-%d %H:%M')}")
+                        topics = db.query(LibTopic).filter(LibTopic.document_id == doc.id).all()
+                        if topics:
+                            st.markdown(f"**Topics Discovered ({len(topics)}):**")
+                            st.write(", ".join([t.name for t in topics]))
+                        
+                        if st.button("🗑️ Delete from Library", key=f"del_lib_{doc.id}"):
+                            db.delete(doc) # Cascade should handle chunks/topics
+                            db.commit()
+                            st.rerun()
 
-            try:
-                sync_limit = 5
-                processed_count = 0
+        with col_sidebar:
+            st.subheader("📥 Upload & Index")
+            uploaded_file = st.file_uploader("Index new PDF", type=["pdf"], key="lib_uploader")
+            if uploaded_file:
+                if st.button("🚀 Start Global Indexing", key="lib_index_btn"):
+                    doc_id = str(uuid.uuid4())
+                    safe_filename = "".join(c for c in uploaded_file.name if c.isalnum() or c in " ._-").strip()
+                    os.makedirs("temp_uploads", exist_ok=True)
+                    file_path = os.path.join("temp_uploads", f"{doc_id}_{safe_filename}")
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
 
-                stream = phase1_graph.stream(state)
-
-                for event in stream:
-                    node_name = list(event.keys())[0]
-                    state.update(event[node_name])
-
-                    if node_name == "ingest":
-                        progress_bar.progress(10, text="Ingested. Analyzing structure...")
-                    elif node_name == "curate":
-                        progress_bar.progress(20, text="Hierarchy extracted. Starting Q&A generation...")
-                    if node_name == "generate":
-                        processed_count += 1
-                        msg = state.get("status_message", "Generating...")
-                        p = 20 + int((processed_count / min(len(state["chunks"]), sync_limit)) * 70)
-                        progress_bar.progress(min(p, 90), text=msg)
-
-                    if node_name == "increment" and processed_count >= sync_limit:
-                        break
-
-                if processed_count < len(state["chunks"]):
+                    state = {
+                        "mode": "INDEXING",
+                        "file_path": file_path,
+                        "doc_id": doc_id,
+                        "subject_id": None,
+                        "chunks": [],
+                        "current_page": 0,
+                        "current_chunk_index": 0,
+                        "hierarchy": [],
+                        "status_message": "Initializing global indexing..."
+                    }
                     from core.background import start_background_task
                     start_background_task(state, doc_id, filename=uploaded_file.name)
-                    st.toast(f"Initial {processed_count} cards for '{uploaded_file.name}' ready! Rest processing in background.")
+                    st.success("Global indexing started!")
+                    st.rerun()
 
-                progress_bar.progress(100, text="Initial Processing Complete!")
-                st.success(f"Successfully started '{uploaded_file.name}'!")
-                time.sleep(1)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Processing Error: {e}")
-            finally:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
+    finally:
+        db.close()
 
 
 def _render_web_research_tab(subject_id: int, subject_name: str):
     """Tab 2: Web Research — topic input, safety check, and pipeline launch."""
 
-    st.markdown("#### Topic Input")
-
-    input_mode = st.radio(
-        "How would you like to provide topics?",
-        ["✏️ Type topics", "📄 Upload topic file"],
-        horizontal=True,
-        key="web_input_mode",
-    )
-
-    raw_topics: list = []
-
-    if input_mode == "✏️ Type topics":
-        topic_text = st.text_area(
-            "Enter topics (one per line, or separated by commas)",
-            height=150,
-            key="web_topic_text",
-            placeholder="e.g.\nBinary Search Trees\nGraph Traversal Algorithms\nDynamic Programming",
-        )
-        if st.button("Parse Topics", key="btn_parse_text"):
-            if topic_text.strip():
-                with st.spinner("Parsing topics..."):
-                    from agents.topic_parser import TopicParserAgent
-                    parser = TopicParserAgent()
-                    raw_topics = parser.parse_topics_from_text(topic_text)
-                st.session_state[f"web_parsed_topics_{subject_id}"] = raw_topics
-            else:
-                st.warning("Please enter some topics first.")
-
-    else:  # Upload topic file
-        topic_file = st.file_uploader(
-            "Upload .txt, .pdf, or .docx",
-            type=["txt", "pdf", "docx"],
-            key="web_topic_file",
-        )
-        if topic_file and st.button("Parse Topics from File", key="btn_parse_file"):
-            suffix = os.path.splitext(topic_file.name)[1].lstrip(".")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{suffix}") as tmp:
-                tmp.write(topic_file.getbuffer())
-                tmp_path = tmp.name
-            try:
-                with st.spinner("Extracting and parsing topics..."):
-                    from agents.topic_parser import TopicParserAgent
-                    parser = TopicParserAgent()
-                    raw_topics = parser.parse_topics_from_file(tmp_path, suffix)
-                st.session_state[f"web_parsed_topics_{subject_id}"] = raw_topics
-            finally:
-                if os.path.exists(tmp_path):
-                    os.remove(tmp_path)
-
-    # --- Parsed topics preview with per-topic removal ---
-    topics_key = f"web_parsed_topics_{subject_id}"
-    if topics_key not in st.session_state:
-        st.session_state[topics_key] = []
-
-    parsed_topics: list = st.session_state[topics_key]
-
-    if parsed_topics:
-        with st.expander(f"📋 Topics identified ({len(parsed_topics)}) — click to review", expanded=True):
-            to_remove = []
-            for i, topic in enumerate(parsed_topics):
-                col_t, col_x = st.columns([0.9, 0.1])
-                col_t.markdown(f"- {topic}")
-                if col_x.button("✕", key=f"rm_topic_{i}", help=f"Remove '{topic}'"):
-                    to_remove.append(i)
-            if to_remove:
-                st.session_state[topics_key] = [
-                    t for j, t in enumerate(parsed_topics) if j not in to_remove
-                ]
-                st.rerun()
+    parsed_topics = _render_topic_input_section(subject_id, suffix="web")
 
     # --- Safety status indicator ---
     st.markdown("---")
@@ -446,7 +533,7 @@ def _render_web_research_tab(subject_id: int, subject_name: str):
     if safety_key not in st.session_state:
         st.session_state[safety_key] = None  # None = not yet checked
 
-    if st.button("Run Safety Check", key="btn_safety_check"):
+    if st.button("Run Safety Check", key=f"btn_safety_check_{subject_id}"):
         with st.spinner("Checking subject safety..."):
             from agents.safety import SafetyAgent
             agent = SafetyAgent()
@@ -468,7 +555,7 @@ def _render_web_research_tab(subject_id: int, subject_name: str):
     st.markdown("---")
     st.markdown("#### Start Research")
 
-    topics_ready = bool(st.session_state.get(topics_key))
+    topics_ready = bool(parsed_topics)
     button_disabled = not topics_ready or not subject_is_safe
 
     if not topics_ready:
@@ -476,11 +563,11 @@ def _render_web_research_tab(subject_id: int, subject_name: str):
 
     if st.button(
         "🔍 Start Web Research",
-        key="btn_start_web_research",
+        key=f"btn_start_web_research_{subject_id}",
         disabled=button_disabled,
         type="primary",
     ):
-        final_topics = list(st.session_state[topics_key])
+        final_topics = list(parsed_topics)
         _run_web_research(subject_id=subject_id, subject_name=subject_name, topics=final_topics)
 
 
@@ -611,7 +698,7 @@ def _run_web_research(subject_id: int, subject_name: str, topics: list):
         st.success("All topics processed!")
 
     # Clear parsed topics for this subject after launch
-    st.session_state[f"web_parsed_topics_{subject_id}"] = []
+    st.session_state[f"parsed_topics_{subject_id}"] = []
     time.sleep(1)
     st.rerun()
 
@@ -695,7 +782,7 @@ def render_study_materials():
         db.close()
 
     # Background Monitor
-    from core.background import background_tasks, stop_background_task
+    from core.background import background_tasks, stop_background_task, clear_background_task
     if background_tasks:
         st.divider()
         st.subheader("⚙️ Active Background Tasks")
@@ -711,18 +798,23 @@ def render_study_materials():
                         curr = task.get("pages_current", 0)
                         total = task.get("pages_total", 1)
                         fc = task.get("flashcards_count", 0)
-                        percent = curr / total if total > 0 else 0
+                        percent = min(max(curr / total if total > 0 else 0, 0.0), 1.0)
                         col_t.markdown(f"**🌐 Researching: {display_name}**")
                         col_t.progress(
                             percent,
                             text=f"Page {curr} / {total} · {fc} flashcard(s) generated",
                         )
                     else:
-                        prog = task.get("progress", 0)
-                        total = task.get("total", 1)
-                        percent = prog / total if total > 0 else 0
+                        tp = task.get("total_pages", 1)
+                        cp = task.get("current_page", 0)
+                        cc = task.get("current_chunk_index", 0)
+                        tc = task.get("chunks_in_page", 1)
+                        
+                        chunk_progress = cc / tc if tc > 0 else 0
+                        percent = min(max((cp + chunk_progress) / tp if tp > 0 else 0, 0.0), 1.0)
+                        
                         col_t.markdown(f"**⏳ Processing: {display_name}**")
-                        col_t.progress(percent, text=f"{prog}/{total} chunks generated")
+                        col_t.progress(percent, text=f"Page {cp+1}/{tp}: {task.get('status_message', 'Processing...')}")
 
                     if col_b.button("⏹️ Stop", key=f"stop_{d_id}"):
                         stop_background_task(d_id)
@@ -732,19 +824,19 @@ def render_study_materials():
                     icon = "🌐" if is_web else "✅"
                     col_t.success(f"{icon} **Completed**: {display_name}")
                     if col_b.button("✖ Clear", key=f"clear_{d_id}"):
-                        del background_tasks[d_id]
+                        clear_background_task(d_id)
                         st.rerun()
 
                 elif task["status"] == "stopped":
                     col_t.warning(f"⏹️ **Stopped**: {display_name}")
                     if col_b.button("✖ Clear", key=f"clear_{d_id}"):
-                        del background_tasks[d_id]
+                        clear_background_task(d_id)
                         st.rerun()
 
                 elif task["status"] == "failed":
                     col_t.error(f"❌ **Failed**: {display_name} — {task.get('error', 'Unknown Error')}")
                     if col_b.button("✖ Clear", key=f"clear_{d_id}"):
-                        del background_tasks[d_id]
+                        clear_background_task(d_id)
                         st.rerun()
 
 def render_mentor_review():
@@ -760,7 +852,9 @@ def render_mentor_review():
                 st.info("No materials available for review.")
 
             for subj in subjects:
-                topics = db.query(Topic).filter(Topic.subject_id == subj.id).all()
+                # Get topics for this subject through attached documents
+                topics = db.query(Topic).join(SubjectDocumentAssociation, Topic.document_id == SubjectDocumentAssociation.document_id).\
+                    filter(SubjectDocumentAssociation.subject_id == subj.id).all()
 
                 has_pending_in_subj = False
                 for topic in topics:
@@ -817,7 +911,9 @@ def render_mentor_review():
             st.subheader("Approved Knowledge")
             subjects = db.query(Subject).filter(Subject.is_archived == False).all()
             for subj in subjects:
-                topics = db.query(Topic).filter(Topic.subject_id == subj.id).order_by(Topic.created_at.desc()).all()
+                # Get topics for this subject through attached documents
+                topics = db.query(Topic).join(SubjectDocumentAssociation, Topic.document_id == SubjectDocumentAssociation.document_id).\
+                    filter(SubjectDocumentAssociation.subject_id == subj.id).order_by(Topic.created_at.desc()).all()
 
                 if topics:
                     st.markdown(f"### 📁 Subject: {subj.name}")
@@ -984,7 +1080,9 @@ def render_learner_view():
         selected_subject = db.query(Subject).filter(Subject.name == selected_subject_name).first()
     
         # 2. Topic Selection within Subject
-        topics = db.query(Topic).filter(Topic.subject_id == selected_subject.id).all()
+        # Get topics for this subject through attached documents
+        topics = db.query(Topic).join(SubjectDocumentAssociation, Topic.document_id == SubjectDocumentAssociation.document_id).\
+            filter(SubjectDocumentAssociation.subject_id == selected_subject.id).all()
     
         if not topics:
             st.info("No topics available for this subject.")
@@ -1024,13 +1122,35 @@ def render_system_tools():
 
         st.warning("These actions are destructive and cannot be undone.")
 
-        if st.button("🚨 Global Reset: Wipe Database & Qdrant Collections"):
-            reset_entire_system()
+        if "confirm_reset" not in st.session_state:
+            st.session_state.confirm_reset = False
+
+        if not st.session_state.confirm_reset:
+            if st.button("🚨 Global Reset: Wipe Database & Qdrant Collections"):
+                st.session_state.confirm_reset = True
+                st.rerun()
+        else:
+            st.error("⚠️ This will permanently delete ALL subjects, documents, and flashcards.")
+            confirm_text = st.text_input(
+                "Type **RESET** to confirm:",
+                key="reset_confirm_input",
+                placeholder="RESET",
+            )
+            col_ok, col_cancel = st.columns([0.2, 0.8])
+            if col_ok.button("Confirm Reset", type="primary"):
+                if confirm_text.strip() == "RESET":
+                    st.session_state.confirm_reset = False
+                    reset_entire_system()
+                else:
+                    st.error("Incorrect confirmation text. Type exactly: RESET")
+            if col_cancel.button("Cancel"):
+                st.session_state.confirm_reset = False
+                st.rerun()
 
         st.divider()
         st.divider()
         
-        sys_tabs = st.tabs(["🟢 Active Subjects", "📦 Archived Subjects"])
+        sys_tabs = st.tabs(["🟢 Active Subjects", "📦 Archived Subjects", "📊 Observability Metrics"])
         
         with sys_tabs[0]:
             st.subheader("Manage Active Subjects & Topics")
@@ -1055,22 +1175,21 @@ def render_system_tools():
                         st.rerun()
 
                     # Topic Editing within Subject
-                    topics = db.query(Topic).filter(Topic.subject_id == subj.id).all()
-                    
-                    if topics:
-                        st.markdown("**(Topics)**")
-                    for topic in topics:
-                        tcol1, tcol2, tcol3 = st.columns([0.6, 0.2, 0.2])
-                        new_topic_name = tcol1.text_input(f"   ↳ Edit Topic Name", value=topic.name, key=f"edit_top_{topic.id}")
-                        if tcol2.button("Update Topic", key=f"upd_top_{topic.id}"):
-                            topic.name = new_topic_name
-                            db.commit()
-                            st.success("Topic updated!")
-                            st.rerun()
-                        if tcol3.button("Delete Topic", key=f"del_top_{topic.id}"):
-                            doc = db.query(DBDocument).filter(DBDocument.id == topic.document_id).first()
-                            delete_topic_data(topic.id, doc.id)
-                            st.rerun()
+                    # In new model, topics are global to doc. 
+                    # Maybe just show docs and allow detaching?
+                    # For now, let's just show attached docs
+                    doc_assocs = db.query(SubjectDocumentAssociation).filter(SubjectDocumentAssociation.subject_id == subj.id).all()
+                    if doc_assocs:
+                        st.markdown("**(Attached Documents)**")
+                    for assoc in doc_assocs:
+                        doc = db.query(DBDocument).filter(DBDocument.id == assoc.document_id).first()
+                        if doc:
+                            dcol1, dcol2 = st.columns([0.8, 0.2])
+                            dcol1.write(f"📄 {doc.filename}")
+                            if dcol2.button("Detach", key=f"det_sys_{subj.id}_{doc.id}"):
+                                db.delete(assoc)
+                                db.commit()
+                                st.rerun()
 
         with sys_tabs[1]:
             st.subheader("Manage Archived Subjects")
@@ -1091,17 +1210,50 @@ def render_system_tools():
                         st.rerun()
                         
                     if col2.button("🚨 Permanently Delete", type="primary", key=f"perm_del_{subj.id}"):
-                        # Recursive delete
-                        documents = db.query(DBDocument).filter(DBDocument.subject_id == subj.id).all()
-                        for d in documents:
-                            topics = db.query(Topic).filter(Topic.document_id == d.id).all()
-                            for t in topics:
-                                delete_topic_data(t.id, d.id)
-                            db.delete(d)
+                        # Recursive delete of subject-specific data
+                        # Flashcards are subject-specific
+                        db.query(Flashcard).filter(Flashcard.subject_id == subj.id).delete()
+                        # Detach all docs
+                        db.query(SubjectDocumentAssociation).filter(SubjectDocumentAssociation.subject_id == subj.id).delete()
+                        # Delete subject
                         db.delete(subj)
                         db.commit()
                         st.success(f"Permanently deleted '{subj.name}'.")
                         st.rerun()
+
+        with sys_tabs[2]: # Metrics Tab
+            st.subheader("📊 RAG Observability Metrics")
+            st.info("Metrics tracked per document upload/web research session.")
+            
+            from core.database import Document as DBDocument
+            all_docs = db.query(DBDocument).order_by(DBDocument.created_at.desc()).all()
+            
+            if not all_docs:
+                st.info("No processing metrics available yet.")
+            else:
+                # Pre-fetch subject names per document in one JOIN query (avoids N+1)
+                doc_subjects_raw = (
+                    db.query(SubjectDocumentAssociation.document_id, Subject.name)
+                    .join(Subject, Subject.id == SubjectDocumentAssociation.subject_id)
+                    .all()
+                )
+                doc_subject_map: dict = {}
+                for doc_id_key, subj_name in doc_subjects_raw:
+                    doc_subject_map.setdefault(doc_id_key, []).append(subj_name)
+
+                for doc in all_docs:
+                    with st.container(border=True):
+                        st.markdown(f"**📄 {doc.filename}**")
+                        subj_names = doc_subject_map.get(doc.id, [])
+                        st.caption(f"Shared in: {', '.join(subj_names) if subj_names else 'Library Only'} | Date: {doc.created_at.strftime('%Y-%m-%d %H:%M')}")
+                        
+                        mcol1, mcol2, mcol3 = st.columns(3)
+                        mcol1.metric("Relevance Rate", f"{doc.relevance_rate}%")
+                        mcol2.metric("Yield Rate", f"{doc.yield_rate/10:.1f} cards/chunk")
+                        mcol3.metric("Grounding (Faithfulness)", f"{doc.faithfulness_score}/5")
+                        
+                        # Add a small progress bar for relevance
+                        st.progress(doc.relevance_rate / 100, text="Filtering efficiency")
 
     finally:
         db.close()
@@ -1111,7 +1263,7 @@ def render_system_tools():
 def main():
     st.sidebar.title("🎓 Nexus Learner")
     
-    nav_options = ["🏠 Dashboard", "📚 Study Materials", "👨‍🏫 Mentor Review", "🧠 Learner", "⚙️ System Tools"]
+    nav_options = ["🏠 Dashboard", "📂 Knowledge Library", "📚 Study Materials", "👨‍🏫 Mentor Review", "🧠 Learner", "⚙️ System Tools"]
     
     # Initialize navigation state
     if "active_nav" not in st.session_state:
@@ -1124,9 +1276,55 @@ def main():
     if active_nav != st.session_state.active_nav:
         st.session_state.active_nav = active_nav
 
+    # --- Active Background Processes UI ---
+    from core.background import background_tasks, stop_background_task
+    
+    @st.fragment(run_every=3) # Refresh every 3 seconds if active
+    def render_background_monitor():
+        active_tasks = {id: task for id, task in background_tasks.items() if task["status"] in ["processing", "failed"]}
+        if active_tasks:
+            st.divider()
+            st.subheader("⏳ Background Processes")
+            for tid, tinfo in active_tasks.items():
+                st.markdown(f"**{tinfo.get('filename', 'Task')}**")
+                
+                if tinfo["status"] == "failed":
+                    st.error(f"Failed: {tinfo.get('error', 'Unknown Error')}")
+                elif tinfo.get("is_web"):
+                    current = tinfo.get("pages_current", 0)
+                    total = tinfo.get("pages_total", 1)
+                    st.progress(min(max(current / total if total > 0 else 0, 0.0), 1.0), text=f"Topics: {current}/{total}")
+                else:
+                    tp = tinfo.get("total_pages", 1)
+                    cp = tinfo.get("current_page", 0)
+                    cc = tinfo.get("current_chunk_index", 0)
+                    tc = tinfo.get("chunks_in_page", 1)
+                    
+                    # Global progress: (Current Page + (Chunk Progress)) / Total Pages
+                    chunk_progress = cc / tc if tc > 0 else 0
+                    global_progress = (cp + chunk_progress) / tp if tp > 0 else 0
+                    
+                    st.progress(
+                        min(max(global_progress, 0.0), 1.0), 
+                        text=f"Page {cp+1}/{tp}: {tinfo.get('status_message', 'Processing...')}"
+                    )
+                
+                if st.button("⏹️ Remove/Stop", key=f"stop_task_{tid}"):
+                    stop_background_task(tid)
+                    # Cleanup if failed
+                    if tinfo["status"] == "failed":
+                        from core.background import background_tasks as bt
+                        del bt[tid]
+                    st.rerun()
+
+    with st.sidebar:
+        render_background_monitor()
+
     # Render Content
     if st.session_state.active_nav == "🏠 Dashboard":
         render_dashboard()
+    elif st.session_state.active_nav == "📂 Knowledge Library":
+        render_knowledge_library()
     elif st.session_state.active_nav == "📚 Study Materials":
         render_study_materials()
     elif st.session_state.active_nav == "👨‍🏫 Mentor Review":

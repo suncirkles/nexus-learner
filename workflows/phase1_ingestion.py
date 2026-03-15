@@ -1,19 +1,22 @@
 """
 workflows/phase1_ingestion.py
 ------------------------------
-LangGraph workflow for Phase 1: Document Ingestion & Flashcard Generation.
-Defines the stateful graph: Ingest → Curate → Generate → Critic → (Loop).
-Each chunk is processed through the generate/critic cycle, with a conditional
-edge to loop back for remaining chunks or terminate at the end.
+LangGraph workflow for Phase 1: Knowledge Library Ingestion & Generation.
+- INDEXING: Pure Document -> Topics/Subtopics mapping.
+- GENERATION: Subject + Topics -> Targeted Flashcards.
 """
 
-from typing import TypedDict, List, Annotated, Dict, Any
+from typing import TypedDict, List, Annotated, Dict, Any, Optional
 from langgraph.graph import StateGraph, START, END
 from agents.ingestion import IngestionAgent
 from agents.socratic import SocraticAgent
 from agents.critic import CriticAgent
-from agents.curator import CuratorAgent
+from agents.topic_assigner import TopicAssignerAgent
+from agents.topic_matcher import TopicMatcherAgent
+from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, Document as DBDocument, SubjectDocumentAssociation
 import logging
+import os
+import uuid as _uuid
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO)
@@ -21,163 +24,422 @@ logger = logging.getLogger(__name__)
 
 # 1. Define the State
 class GraphState(TypedDict):
-    file_path: str
+    mode: str                 # "INDEXING" or "GENERATION"
+    file_path: Optional[str]
     doc_id: str
-    subject_id: int
-    full_text: str 
+    subject_id: Optional[int] # Only for GENERATION
+    target_topics: List[str]  # Only for GENERATION
+
+    # State tracking
+    total_pages: int
+    current_page: int
     chunks: List[Any]
-    hierarchy: List[Dict[str, Any]]
-    doc_summary: str
     current_chunk_index: int
+
+    # Discovery context
+    hierarchy: List[Dict[str, Any]]
+
+    # Qdrant batch buffer: accumulates per-page docs, flushed at page boundary
+    pending_qdrant_docs: List[Dict[str, Any]]  # {"text": str, "metadata": dict}
+
+    # Semantic topic matching results (GENERATION only)
+    # None  → no filter (all chunks)
+    # []    → filter ran but found no matches
+    # [ids] → filter to these subtopic IDs
+    matched_subtopic_ids: Optional[List[int]]
+
+    # Cards produced by the current chunk — consumed by node_critic
+    current_new_cards: List[Dict[str, Any]]
+
+    # Results
     generated_flashcards: List[Dict[str, Any]]
     status_message: str
 
 # 2. Initialize Agents
 ingestion_agent = IngestionAgent()
+topic_assigner = TopicAssignerAgent()
+topic_matcher = TopicMatcherAgent()
 socratic_agent = SocraticAgent()
 critic_agent = CriticAgent()
-curator_agent = CuratorAgent()
 
 # 3. Define Nodes
-def node_ingest(state: GraphState):
-    if state.get("chunks"):
-        logger.info("--- SKIPPING INGEST: Chunks already present in state ---")
-        return {}
-        
-    logger.info(f"--- INGESTING: {state['file_path']} for Subject ID: {state['subject_id']} ---")
-    chunks = ingestion_agent.process_document(state["file_path"], state["doc_id"], state["subject_id"])
-    
-    # Combine chunk text for curator
-    full_text = "\n\n".join([c.page_content for c in chunks])
-    
-    return {
-        "chunks": chunks,
-        "full_text": full_text,
-        "status_message": f"Successfully parsed document into {len(chunks)} sections."
-    }
 
-def node_curate(state: GraphState):
-    if state.get("hierarchy") and state.get("doc_summary"):
-        logger.info("--- SKIPPING CURATE: Hierarchy already present in state ---")
-        return {}
+def node_match_topics(state: GraphState):
+    """[GENERATION ONLY] Semantically maps user-provided topic names to indexed subtopic IDs.
+
+    Uses TopicMatcherAgent (LLM-based) so that broad or loosely-worded user
+    inputs like "RDD" still match indexed subtopics called "RDDs Overview" or
+    "Resilient Distributed Datasets".
+
+    Sets state["matched_subtopic_ids"]:
+      None  → no target_topics supplied — all chunks will be used
+      []    → topics supplied but no semantic match found
+      [ids] → list of matching subtopic IDs to filter chunks by
+    """
+    if state.get("mode") != "GENERATION":
+        return {}  # no-op for INDEXING
+
+    target_topics = state.get("target_topics", [])
+    doc_id = state["doc_id"]
+
+    if not target_topics:
+        return {
+            "matched_subtopic_ids": None,
+            "status_message": "No topic filter requested — all chunks will be used.",
+        }
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(Subtopic, Topic.name.label("topic_name"))
+            .join(Topic, Topic.id == Subtopic.topic_id)
+            .filter(Topic.document_id == doc_id)
+            .all()
+        )
+        indexed_subtopics = [
+            {"id": r.Subtopic.id, "name": r.Subtopic.name, "topic_name": r.topic_name}
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+    if not indexed_subtopics:
+        logger.warning(f"No subtopics indexed for doc {doc_id} — skipping semantic match.")
+        return {
+            "matched_subtopic_ids": [],
+            "status_message": f"No indexed subtopics found for document {doc_id}.",
+        }
+
+    logger.info(
+        f"TopicMatcher: matching {len(target_topics)} user topic(s) "
+        f"against {len(indexed_subtopics)} indexed subtopics."
+    )
+    matches = topic_matcher.match_topics(target_topics, indexed_subtopics)
+
+    matched_ids: List[int] = list({
+        sid
+        for m in matches
+        for sid in m.matched_subtopic_ids
+    })
+
+    if matched_ids:
+        logger.info(f"TopicMatcher: resolved {len(matched_ids)} subtopic ID(s): {matched_ids}")
+        return {
+            "matched_subtopic_ids": matched_ids,
+            "status_message": (
+                f"Matched {len(matched_ids)} subtopic(s) for "
+                f"{len(target_topics)} requested topic(s)."
+            ),
+        }
+    else:
+        logger.warning(f"TopicMatcher: no subtopics matched for topics {target_topics}")
+        return {
+            "matched_subtopic_ids": [],
+            "status_message": f"No indexed subtopics matched: {target_topics}",
+        }
+
+
+def node_ingest(state: GraphState):
+    """
+    INDEXING: Loads and chunks PDF pages globally.
+    GENERATION: Loads existing chunks from library for targeted subtopics.
+    """
+    mode = state.get("mode", "INDEXING")
+    doc_id = state["doc_id"]
+    
+    if mode == "INDEXING":
+        file_path = state["file_path"]
+        total_pages = state.get("total_pages") or ingestion_agent.get_page_count(file_path)
+        current_page = state.get("current_page", 0)
+
+        if current_page >= total_pages:
+            return {"status_message": "Document indexing complete."}
+
+        # Create doc record if first visit (subject_id=None as it's global Library)
+        if current_page == 0:
+            db = SessionLocal()
+            try:
+                # Hash = sample_text + file_size + basename — must match IngestionAgent.create_document_record
+                sample_text = ingestion_agent.load_page_text(file_path, 0)[:10000]
+                file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                content_hash = ingestion_agent.get_content_hash(sample_text + str(file_size) + os.path.basename(file_path))
+                
+                existing_doc = db.query(DBDocument).filter(DBDocument.content_hash == content_hash).first()
+                if existing_doc:
+                    doc_id = existing_doc.id
+                else:
+                    # Fix path separator for Windows
+                    clean_filename = os.path.basename(file_path)
+                    new_doc = DBDocument(id=doc_id, filename=clean_filename, title=clean_filename, content_hash=content_hash)
+                    db.add(new_doc)
+                    db.commit()
+                    db.refresh(new_doc)
+            finally:
+                db.close()
+
+        logger.info(f"--- LIBRARY INDEXING: Page {current_page + 1}/{total_pages} ---")
+        page_text = ingestion_agent.load_page_text(file_path, current_page)
+        temp_chunks = ingestion_agent.text_splitter.split_text(page_text)
         
-    logger.info("--- CURATING STRUCTURE ---")
-    result = curator_agent.curate_structure(state["subject_id"], state["doc_id"], state["full_text"])
-    return {
-        "hierarchy": result["hierarchy"],
-        "doc_summary": result["doc_summary"],
-        "status_message": f"Integrated content into {len(result['hierarchy'])} topics."
-    }
+        return {
+            "total_pages": total_pages,
+            "chunks": temp_chunks,
+            "current_chunk_index": 0,
+            "current_page": current_page,
+            "status_message": f"Global Indexing Page {current_page + 1}/{total_pages}...",
+            "doc_id": doc_id
+        }
+    
+    else:  # GENERATION mode
+        logger.info("--- GENERATION: Loading Chunks for Targeted Subtopics ---")
+        matched_subtopic_ids = state.get("matched_subtopic_ids")  # set by node_match_topics
+
+        db = SessionLocal()
+        try:
+            query = db.query(ContentChunk).join(Subtopic).join(Topic).filter(
+                Topic.document_id == doc_id
+            )
+
+            if matched_subtopic_ids is None:
+                # No topic filter — process all chunks for this document
+                pass
+            elif matched_subtopic_ids:
+                # Filter to semantically matched subtopics
+                query = query.filter(ContentChunk.subtopic_id.in_(matched_subtopic_ids))
+            else:
+                # TopicMatcher ran but found no matches — nothing to process
+                logger.warning("TopicMatcher found no matching subtopics — returning empty chunk list.")
+                return {
+                    "chunks": [],
+                    "current_chunk_index": 0,
+                    "status_message": "No chunks matched the requested topics.",
+                }
+
+            db_chunks = query.all()
+            logger.info(f"Found {len(db_chunks)} candidate chunk(s) for generation.")
+
+            chunks_to_process = []
+            for c in db_chunks:
+                # Skip subtopics that already have cards for this subject (incremental)
+                already_has_cards = db.query(Flashcard).filter(
+                    Flashcard.subject_id == state["subject_id"],
+                    Flashcard.subtopic_id == c.subtopic_id,
+                ).count() > 0
+                if already_has_cards:
+                    continue
+                chunks_to_process.append({
+                    "id": c.id,
+                    "text": c.text,
+                    "subtopic_id": c.subtopic_id,
+                })
+
+            return {
+                "chunks": chunks_to_process,
+                "current_chunk_index": 0,
+                "status_message": f"Identified {len(chunks_to_process)} chunk(s) for card generation.",
+            }
+        finally:
+            db.close()
+
+def node_assign_topic(state: GraphState):
+    """[INDEXING ONLY] Assigns topics globally and saves to Library.
+
+    Accumulates Qdrant docs in state (pending_qdrant_docs) instead of issuing
+    one connection per chunk.  The batch is flushed in node_next_page /
+    node_flush_qdrant at page boundaries.
+    """
+    idx = state["current_chunk_index"]
+    chunk_text = state["chunks"][idx]
+    doc_id = state["doc_id"]
+    hierarchy = state.get("hierarchy", [])
+    pending = list(state.get("pending_qdrant_docs", []))
+
+    assignment = topic_assigner.assign_topic(chunk_text, hierarchy)
+
+    db = SessionLocal()
+    try:
+        topic_obj = db.query(Topic).filter(
+            Topic.document_id == doc_id,
+            Topic.name.ilike(assignment.topic_name)
+        ).first()
+        if not topic_obj:
+            topic_obj = Topic(document_id=doc_id, name=assignment.topic_name)
+            db.add(topic_obj)
+            db.commit()
+            db.refresh(topic_obj)
+            hierarchy.append({"topic": assignment.topic_name, "subtopics": [assignment.subtopic_name]})
+
+        sub_obj = db.query(Subtopic).filter(
+            Subtopic.topic_id == topic_obj.id,
+            Subtopic.name == assignment.subtopic_name
+        ).first()
+        if not sub_obj:
+            sub_obj = Subtopic(topic_id=topic_obj.id, name=assignment.subtopic_name)
+            db.add(sub_obj)
+            db.commit()
+            db.refresh(sub_obj)
+            for item in hierarchy:
+                if item["topic"] == assignment.topic_name and assignment.subtopic_name not in item["subtopics"]:
+                    item["subtopics"].append(assignment.subtopic_name)
+
+        new_chunk = ContentChunk(document_id=doc_id, text=chunk_text, subtopic_id=sub_obj.id)
+        db.add(new_chunk)
+        db.commit()
+        db.refresh(new_chunk)
+
+        # Queue for batch Qdrant upsert (flushed per page)
+        pending.append({"text": chunk_text, "metadata": {"document_id": doc_id, "db_chunk_id": new_chunk.id}})
+
+        return {
+            "hierarchy": hierarchy,
+            "pending_qdrant_docs": pending,
+            "status_message": f"Indexed topic: {assignment.subtopic_name}",
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error indexing chunk {idx} for doc {doc_id}: {e}", exc_info=True)
+        return {
+            "hierarchy": hierarchy,
+            "pending_qdrant_docs": pending,
+            "status_message": f"Warning: failed to index chunk {idx} — {e}",
+        }
+    finally:
+        db.close()
+
+
+def _flush_qdrant_batch(pending_docs: List[Dict[str, Any]]):
+    """Upserts a batch of pending docs to Qdrant in a single call."""
+    if not pending_docs:
+        return
+    from langchain_core.documents import Document as LCDoc
+    from langchain_qdrant import QdrantVectorStore
+    from core.config import settings
+    lc_docs = [LCDoc(page_content=d["text"], metadata=d["metadata"]) for d in pending_docs]
+    try:
+        QdrantVectorStore.from_documents(
+            lc_docs,
+            ingestion_agent.embeddings,
+            url=settings.QDRANT_URL,
+            collection_name=settings.QDRANT_COLLECTION_NAME,
+        )
+    except Exception as e:
+        logger.error(f"Qdrant batch flush failed ({len(pending_docs)} docs): {e}", exc_info=True)
+        raise
 
 def node_generate(state: GraphState):
+    """[GENERATION ONLY] Subject-specific cards."""
     idx = state["current_chunk_index"]
-    chunk = state["chunks"][idx]
-    logger.info(f"--- GENERATING FLASHCARDS FOR CHUNK {idx+1}/{len(state['chunks'])} ---")
-    
-    # Find the best matching subtopic for this chunk
-    subtopic_id = None
-    subtopic_name = "General"
-    
-    if state["hierarchy"]:
-        # Simple heuristic: find subtopic whose name/summary matches chunk text or use LLM
-        # For better accuracy, we'll use a tiny LLM call to classify
-        from core.models import get_llm
-        from langchain_core.prompts import ChatPromptTemplate
-        from pydantic import BaseModel, Field
-        
-        class Classification(BaseModel):
-            subtopic_id: int = Field(description="The ID of the most relevant subtopic.")
+    chunk_data = state["chunks"][idx]
+    subject_id = state["subject_id"]
 
-        classifier = get_llm(purpose="routing").with_structured_output(Classification)
-        
-        all_subs = []
-        for t in state["hierarchy"]:
-            for s in t["subtopics"]:
-                all_subs.append(f"ID {s['id']}: {s['name']} ({s['summary']})")
-        
-        mapping_prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are a classifier. Given a text chunk and a list of subtopics, return the ID of the ONE subtopic it most closely belongs to.\n\nSubtopics:\n{subtopics}"),
-            ("user", "Chunk Text: {text}")
-        ])
-        
-        try:
-            mapping_result = classifier.invoke(
-                mapping_prompt.format(
-                    subtopics="\n".join(all_subs),
-                    text=chunk.page_content[:1000]
-                )
-            )
-            subtopic_id = mapping_result.subtopic_id
-            
-            # Find name for status message
-            for t in state["hierarchy"]:
-                for s in t["subtopics"]:
-                    if s["id"] == subtopic_id:
-                        subtopic_name = s["name"]
-                        break
-        except Exception as e:
-            logger.warning(f"Classification failed: {e}. Defaulting to first subtopic.")
-            subtopic_id = state["hierarchy"][0]["subtopics"][0]["id"]
-            subtopic_name = state["hierarchy"][0]["subtopics"][0]["name"]
-    
-    flashcard = socratic_agent.generate_flashcard(state["doc_id"], chunk, subtopic_id=subtopic_id)
-    
+    from langchain_core.documents import Document as LCDoc
+    chunk_doc = LCDoc(page_content=chunk_data["text"], metadata={"db_chunk_id": chunk_data["id"]})
+
+    result = socratic_agent.generate_flashcard(
+        state["doc_id"], chunk_doc,
+        subtopic_id=chunk_data["subtopic_id"],
+        subject_id=subject_id,
+    )
+
+    new_cards = []
+    if result.get("status") == "success":
+        new_cards = result.get("flashcards", [])
+
     return {
-        "generated_flashcards": state.get("generated_flashcards", []) + [flashcard],
-        "status_message": f"Generating Q&A for Subtopic: '{subtopic_name}' ({idx+1}/{len(state['chunks'])})"
+        "generated_flashcards": state.get("generated_flashcards", []) + new_cards,
+        "current_new_cards": new_cards,
+        "status_message": f"Generated {len(new_cards)} Q&A(s) for Subject {subject_id}.",
     }
+
 
 def node_critic(state: GraphState):
-    flashcard = state["generated_flashcards"][-1]
-    idx = state["current_chunk_index"]
-    chunk = state["chunks"][idx]
-    
-    logger.info(f"--- EVALUATING FLASHCARD {idx+1} ---")
-    # For our simple CriticAgent, we need the flashcard ID
-    fc_id = flashcard.get("flashcard_id")
-    if fc_id:
-        critic_agent.evaluate_flashcard(
-            flashcard_id=fc_id,
-            source_text=chunk.page_content,
-            question=flashcard["question"],
-            answer=flashcard["answer"]
-        )
-    
-    return {
-        "status_message": f"Verified grounding for content {idx+1}. Ready for review."
-    }
+    """[GENERATION ONLY] Evaluates ALL cards produced by the current chunk."""
+    new_cards = state.get("current_new_cards", [])
+    if not new_cards:
+        return {"status_message": "No cards to verify."}
 
-def should_continue(state: GraphState):
-    if state["current_chunk_index"] < len(state["chunks"]) - 1:
-        return "continue"
-    return "end"
+    source_text = state["chunks"][state["current_chunk_index"]]["text"]
+    for card in new_cards:
+        fc_id = card.get("flashcard_id")
+        if fc_id:
+            critic_agent.evaluate_flashcard(
+                flashcard_id=fc_id,
+                source_text=source_text,
+                question=card["question"],
+                answer=card["answer"],
+            )
+    return {"status_message": "Verification complete.", "current_new_cards": []}
+
 
 def node_increment(state: GraphState):
     return {"current_chunk_index": state["current_chunk_index"] + 1}
 
-# 4. Build the Graph
+
+def node_next_page(state: GraphState):
+    """Flushes the Qdrant batch for the completed page, then advances."""
+    _flush_qdrant_batch(state.get("pending_qdrant_docs", []))
+    return {"current_page": state["current_page"] + 1, "pending_qdrant_docs": []}
+
+
+def node_flush_qdrant(state: GraphState):
+    """Flushes the final Qdrant batch at the end of INDEXING (last page)."""
+    _flush_qdrant_batch(state.get("pending_qdrant_docs", []))
+    return {"pending_qdrant_docs": [], "status_message": "Document indexing complete."}
+
+# 4. Build Graph
 workflow = StateGraph(GraphState)
 
+workflow.add_node("match_topics", node_match_topics)
 workflow.add_node("ingest", node_ingest)
-workflow.add_node("curate", node_curate)
+workflow.add_node("assign_topic", node_assign_topic)
 workflow.add_node("generate", node_generate)
 workflow.add_node("critic", node_critic)
 workflow.add_node("increment", node_increment)
+workflow.add_node("next_page", node_next_page)
+workflow.add_node("flush_qdrant", node_flush_qdrant)
 
-workflow.add_edge(START, "ingest")
-workflow.add_edge("ingest", "curate")
-workflow.add_edge("curate", "generate")
-workflow.add_edge("generate", "critic")
+# match_topics is a no-op for INDEXING; for GENERATION it resolves topic names
+# to subtopic IDs before node_ingest loads the chunk list.
+workflow.add_edge(START, "match_topics")
+workflow.add_edge("match_topics", "ingest")
+
+
+def router_after_ingest(state: GraphState):
+    if not state.get("chunks"):
+        return END
+    return "assign_topic" if state["mode"] == "INDEXING" else "generate"
+
 
 workflow.add_conditional_edges(
-    "critic",
-    should_continue,
-    {
-        "continue": "increment",
-        "end": END
-    }
+    "ingest", router_after_ingest,
+    {"assign_topic": "assign_topic", "generate": "generate", END: END},
 )
 
-workflow.add_edge("increment", "generate")
+workflow.add_edge("assign_topic", "increment")
+workflow.add_edge("generate", "critic")
+workflow.add_edge("critic", "increment")
+
+
+def router_after_increment(state: GraphState):
+    idx = state["current_chunk_index"]
+    chunks = state.get("chunks", [])
+    if idx < len(chunks):
+        return "assign_topic" if state["mode"] == "INDEXING" else "generate"
+    if state["mode"] == "INDEXING":
+        if state["current_page"] < state["total_pages"] - 1:
+            return "next_page"
+        return "flush_qdrant"  # last page: flush batch before END
+    return END
+
+
+workflow.add_conditional_edges(
+    "increment", router_after_increment,
+    {"assign_topic": "assign_topic", "generate": "generate",
+     "next_page": "next_page", "flush_qdrant": "flush_qdrant", END: END},
+)
+
+workflow.add_edge("next_page", "ingest")
+workflow.add_edge("flush_qdrant", END)
 
 phase1_graph = workflow.compile()

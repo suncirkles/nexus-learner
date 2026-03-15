@@ -8,6 +8,7 @@ is processed in a daemon thread. This module handles both:
   - Web research background tasks (remaining topics after sync burst)
 """
 
+import os
 import threading
 import logging
 from typing import Dict, Any, List
@@ -26,17 +27,27 @@ _lock = threading.Lock()
 # PDF background tasks
 # ---------------------------------------------------------------------------
 
-def run_remaining_generation(state: Dict[str, Any], doc_id: str, stop_event: threading.Event, filename: str = "Unknown"):
-    """Continues the LangGraph workflow for the remaining chunks in a background thread."""
+def run_document_generation(state: Dict[str, Any], doc_id: str, stop_event: threading.Event, filename: str = "Unknown"):
+    """Runs the full Phase 1 LangGraph workflow in a background thread."""
+    file_path = state.get("file_path")
     try:
         logger.info(f"Background thread started for Document: {doc_id} ({filename})")
         with _lock:
             background_tasks[doc_id] = {
                 "status": "processing",
                 "progress": 0,
-                "total": len(state.get("chunks", [])),
+                "total": 1,
                 "filename": filename,
+                "mode": state.get("mode", "INDEXING"),
                 "is_web": False,
+                "status_message": "Initializing...",
+                # UI progress keys — initialised here so reads never KeyError
+                "total_pages": 1,
+                "current_page": 0,
+                "current_chunk_index": 0,
+                "chunks_in_page": 1,
+                "total_chunks": 0,
+                "flashcards_count": 0,
             }
 
         for event in phase1_graph.stream(state):
@@ -46,26 +57,66 @@ def run_remaining_generation(state: Dict[str, Any], doc_id: str, stop_event: thr
                     background_tasks[doc_id]["status"] = "stopped"
                 return
 
-            if "generate" in event:
-                idx = event["generate"].get("current_chunk_index", 0)
-                with _lock:
-                    background_tasks[doc_id]["progress"] = idx + 1
+            # Update state with node results
+            for node_name, node_update in event.items():
+                if isinstance(node_update, dict):
+                    state.update(node_update)
+                    
+                    with _lock:
+                        task_info = background_tasks[doc_id]
+                        if task_info["mode"] == "INDEXING":
+                            if "total_pages" in node_update:
+                                background_tasks[doc_id]["total_pages"] = node_update["total_pages"]
+                            if "current_page" in node_update:
+                                background_tasks[doc_id]["current_page"] = node_update["current_page"]
+                            if "status_message" in node_update:
+                                background_tasks[doc_id]["status_message"] = node_update["status_message"]
+                        else:
+                            # Generation Mode
+                            if "chunks" in node_update:
+                                total_chunks = len(node_update["chunks"])
+                                background_tasks[doc_id]["total_chunks"] = total_chunks
+                                background_tasks[doc_id]["status_message"] = f"Total chunks to process: {total_chunks}"
+                            
+                            if "current_chunk_index" in node_update:
+                                background_tasks[doc_id]["current_chunk_index"] = node_update["current_chunk_index"]
+                            
+                            if "status_message" in node_update:
+                                background_tasks[doc_id]["status_message"] = node_update["status_message"]
+                            
+                            if "generated_flashcards" in node_update:
+                                background_tasks[doc_id]["flashcards_count"] = len(node_update["generated_flashcards"])
 
         with _lock:
             background_tasks[doc_id]["status"] = "completed"
+            background_tasks[doc_id]["status_message"] = "Task Complete!"
         logger.info(f"Background thread finished for Document: {doc_id}")
     except Exception as e:
         logger.error(f"Error in background generation for {doc_id}: {e}")
         with _lock:
             background_tasks[doc_id] = {"status": "failed", "error": str(e), "is_web": False}
+    finally:
+        # Robust temp file cleanup with a small retry for Windows file locks
+        if file_path and os.path.exists(file_path):
+            import time
+            for i in range(3):
+                try:
+                    os.remove(file_path)
+                    logger.debug(f"Temporary file removed: {file_path}")
+                    break
+                except Exception as e:
+                    if i < 2:
+                        time.sleep(0.5)
+                        continue
+                    logger.warning(f"Failed to remove temporary file {file_path} after retries: {e}")
 
 
 def start_background_task(state: Dict[str, Any], doc_id: str, filename: str = "Unknown"):
-    """Spawns a new thread for PDF background generation."""
+    """Spawns a new thread for full PDF background generation."""
     stop_event = threading.Event()
     stop_events[doc_id] = stop_event
     thread = threading.Thread(
-        target=run_remaining_generation,
+        target=run_document_generation,
         args=(state, doc_id, stop_event, filename),
         daemon=True,
     )
@@ -192,3 +243,10 @@ def stop_background_task(doc_id: str):
             stop_events[doc_id].set()
             if doc_id in background_tasks:
                 background_tasks[doc_id]["status"] = "stopped"
+
+
+def clear_background_task(task_id: str):
+    """Removes a completed/stopped/failed task from the registry under the lock."""
+    with _lock:
+        background_tasks.pop(task_id, None)
+        stop_events.pop(task_id, None)

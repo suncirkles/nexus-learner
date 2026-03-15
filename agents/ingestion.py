@@ -10,13 +10,17 @@ import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
 import os
+from typing import List
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_qdrant import QdrantVectorStore
 from langchain_openai import OpenAIEmbeddings
 from langchain_core.documents import Document
 from core.config import settings
 import hashlib
+import logging
 from core.database import SessionLocal, ContentChunk, Document as DBDocument
+
+logger = logging.getLogger(__name__)
 
 class IngestionAgent:
     def __init__(self):
@@ -33,113 +37,128 @@ class IngestionAgent:
             is_separator_regex=False,
         )
 
-    def extract_text_from_pdf(self, file_path: str) -> str:
-        """Extracts text from PDF, falling back to OCR if a page is purely image-based."""
-        doc = fitz.open(file_path)
-        full_text = ""
-        
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            text = page.get_text("text")
-            
-            # Simple heuristic: if less than 50 chars, assume it might be a scanned image
-            if len(text.strip()) < 50:
-                 try:
-                    pix = page.get_pixmap()
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    text = pytesseract.image_to_string(img)
-                 except Exception as e:
-                    # Gracefully skip OCR if tesseract is missing
-                    print(f"OCR failed or Tesseract not found: {e}. Skipping OCR for page {page_num}.")
-                 
-            full_text += text + "\n\n"
-            
-        return full_text
+    def get_page_count(self, file_path: str) -> int:
+        """Returns the total number of pages in a PDF."""
+        if not file_path.lower().endswith('.pdf'):
+            return 1
+        with fitz.open(file_path) as doc:
+            count = len(doc)
+        return count
 
     def extract_text_from_image(self, file_path: str) -> str:
-        """Extracts text from an image directly using Tesseract."""
+        """Extracts text from an image file using Tesseract OCR."""
         try:
             img = Image.open(file_path)
             return pytesseract.image_to_string(img)
         except Exception as e:
-            return f"Error: Tesseract OCR failed. Is it installed? Details: {e}"
-        
+            logger.warning(f"OCR failed for image {file_path}: {e}")
+            return ""
+
+    def load_page_text(self, file_path: str, page_num: int) -> str:
+        """Extracts text from a single PDF page with OCR fallback."""
+        if not file_path.lower().endswith('.pdf'):
+            if page_num > 0: return ""
+            return self.extract_text_from_image(file_path)
+            
+        with fitz.open(file_path) as doc:
+            if page_num >= len(doc):
+                return ""
+                
+            page = doc.load_page(page_num)
+            text = page.get_text("text")
+            
+            if len(text.strip()) < 50:
+                try:
+                    pix = page.get_pixmap()
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    text = pytesseract.image_to_string(img)
+                except Exception as e:
+                    logger.warning(f"OCR failed for page {page_num}: {e}")
+            
+        return text
+
     def get_content_hash(self, text: str) -> str:
         """Generates a SHA256 hash of the text content."""
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
-    def process_document(self, file_path: str, doc_id: str, subject_id: int) -> list[Document]:
-        """Orchestrates extraction, chunking, DB persistence, and Vector DB embedding."""
-        if file_path.lower().endswith('.pdf'):
-            raw_text = self.extract_text_from_pdf(file_path)
-        elif file_path.lower().endswith(('.png', '.jpg', '.jpeg')):
-            raw_text = self.extract_text_from_image(file_path)
-        else:
-             raise ValueError("Unsupported file type")
-             
-        # Duplicate Check
-        content_hash = self.get_content_hash(raw_text)
+    def create_document_record(self, file_path: str, doc_id: str, subject_id: int = None) -> DBDocument:
+        """Creates a document record in the database if it doesn't exist."""
+        sample_text = self.load_page_text(file_path, 0)[:10000]
+        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        content_hash = self.get_content_hash(sample_text + str(file_size) + os.path.basename(file_path))
+        
         db = SessionLocal()
         try:
             existing_doc = db.query(DBDocument).filter(DBDocument.content_hash == content_hash).first()
             if existing_doc:
-                raise ValueError(f"Duplicate content detected. This document has already been processed as '{existing_doc.filename}'.")
+                # If it exists, just return it
+                return existing_doc
             
             uploaded_filename = os.path.basename(file_path)
-            # Generate a meaningful title if possible
             title = uploaded_filename
             try:
                 from core.models import get_llm
                 from langchain_core.prompts import ChatPromptTemplate
                 title_llm = get_llm(purpose="primary", temperature=0)
                 title_prompt = ChatPromptTemplate.from_template(
-                    "Generate a short, professional title (max 5 words) for a document with the following content summary:\n\n{summary}"
+                    "Generate a short, professional title (max 5 words) for a document with the following content sample:\n\n{summary}"
                 )
-                title_chain = title_prompt | title_llm
-                # Use the first 2000 chars as a summary base if no better summary exists
-                title_res = title_chain.invoke({"summary": raw_text[:2000]})
+                title_res = (title_prompt | title_llm).invoke({"summary": sample_text[:2000]})
                 title = title_res.content.strip().strip('"')
             except Exception as e:
-                print(f"Title generation failed: {e}")
+                logger.warning(f"Title generation failed: {e}")
 
-            # Save to DB
-            new_doc = DBDocument(id=doc_id, subject_id=subject_id, filename=uploaded_filename, title=title, content_hash=content_hash)
+            new_doc = DBDocument(id=doc_id, filename=uploaded_filename, title=title, content_hash=content_hash)
             db.add(new_doc)
+            
+            # If a subject_id is provided, create an association
+            if subject_id:
+                from core.database import SubjectDocumentAssociation
+                # Check for existing association
+                existing_assoc = db.query(SubjectDocumentAssociation).filter(
+                    SubjectDocumentAssociation.subject_id == subject_id,
+                    SubjectDocumentAssociation.document_id == new_doc.id
+                ).first()
+                if not existing_assoc:
+                    new_assoc = SubjectDocumentAssociation(subject_id=subject_id, document_id=new_doc.id)
+                    db.add(new_assoc)
+
             db.commit()
+            db.refresh(new_doc)
+            return new_doc
         finally:
             db.close()
 
-        # Create LangChain chunks
-        chunks = self.text_splitter.split_text(raw_text)
-        
-        # 1. Save to Relational DB for source reference mapping
+    def ingest_text_chunk(self, doc_id: str, text: str) -> List[Document]:
+        """Processes a single chunk of text: splitting, DB save, and Vector DB embedding."""
+        chunks = self.text_splitter.split_text(text)
+        if not chunks:
+            return []
+
+        # 1. Save to Relational DB
         db = SessionLocal()
-        saved_chunk_ids = []
+        lc_documents = []
         try:
             for chunk_text in chunks:
                 db_chunk = ContentChunk(document_id=doc_id, text=chunk_text)
                 db.add(db_chunk)
                 db.commit()
                 db.refresh(db_chunk)
-                saved_chunk_ids.append(db_chunk.id)
+                
+                doc = Document(
+                    page_content=chunk_text,
+                    metadata={"document_id": doc_id, "db_chunk_id": db_chunk.id}
+                )
+                lc_documents.append(doc)
+            
+            # 2. Ingest into Vector DB
+            QdrantVectorStore.from_documents(
+                lc_documents,
+                self.embeddings,
+                url=settings.QDRANT_URL,
+                collection_name=settings.QDRANT_COLLECTION_NAME
+            )
         finally:
              db.close()
              
-        # 2. Prepare LangChain Document objects with Relational DB IDs as metadata
-        lc_documents = []
-        for i, chunk_text in enumerate(chunks):
-            doc = Document(
-                page_content=chunk_text,
-                metadata={"document_id": doc_id, "db_chunk_id": saved_chunk_ids[i]}
-            )
-            lc_documents.append(doc)
-            
-        # 3. Ingest into Vector DB (Qdrant)
-        QdrantVectorStore.from_documents(
-            lc_documents,
-            self.embeddings,
-            url=settings.QDRANT_URL,
-            collection_name=settings.QDRANT_COLLECTION_NAME
-        )
-        
         return lc_documents

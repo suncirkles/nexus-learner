@@ -91,7 +91,9 @@ class IngestionAgent:
         try:
             existing_doc = db.query(DBDocument).filter(DBDocument.content_hash == content_hash).first()
             if existing_doc:
-                # If it exists, just return it
+                # C9: expunge before returning so the object is cleanly detached;
+                # all eagerly-loaded attributes remain accessible without a session.
+                db.expunge(existing_doc)
                 return existing_doc
             
             uploaded_filename = os.path.basename(file_path)
@@ -125,6 +127,9 @@ class IngestionAgent:
 
             db.commit()
             db.refresh(new_doc)
+            # C9: expunge before returning so the object is cleanly detached;
+            # all eagerly-loaded attributes remain accessible without a session.
+            db.expunge(new_doc)
             return new_doc
         finally:
             db.close()
@@ -145,9 +150,10 @@ class IngestionAgent:
                 db.commit()
                 db.refresh(db_chunk)
                 
+                chunk_id = db_chunk.id  # C10: capture as primitive before session may change state
                 doc = Document(
                     page_content=chunk_text,
-                    metadata={"document_id": doc_id, "db_chunk_id": db_chunk.id}
+                    metadata={"document_id": doc_id, "db_chunk_id": chunk_id}
                 )
                 lc_documents.append(doc)
             

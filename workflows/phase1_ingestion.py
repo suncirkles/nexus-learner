@@ -166,7 +166,8 @@ def node_ingest(state: GraphState):
                 
                 existing_doc = db.query(DBDocument).filter(DBDocument.content_hash == content_hash).first()
                 if existing_doc:
-                    doc_id = existing_doc.id
+                    doc_id = str(existing_doc.id)  # C16: capture as primitive string
+                    db.expunge(existing_doc)        # C16: detach before session close
                 else:
                     # Fix path separator for Windows
                     clean_filename = os.path.basename(file_path)

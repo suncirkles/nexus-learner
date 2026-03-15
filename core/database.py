@@ -147,8 +147,19 @@ class Flashcard(Base):
     question = Column(Text)
     answer = Column(Text)
     
+    # Question type & complexity
+    question_type    = Column(String(30), default="active_recall")
+    # enum: active_recall | fill_blank | short_answer | long_answer | numerical | scenario
+    complexity_level = Column(String(10), nullable=True)
+    # enum: simple | medium | complex — nullable until mentor confirms
+    rubric           = Column(Text, nullable=True)
+    # JSON: list of {criterion, description} grading criteria for this card
+    critic_rubric_scores = Column(Text, nullable=True)
+    # JSON: {"accuracy": 1-4, "logic": 1-4, "grounding": 1-4, "clarity": 1-4}
+
     # Evals / Grounding
     critic_score = Column(Integer, default=0)
+    # Backward-compatible aggregate: round(mean([accuracy, logic, grounding, clarity]))
     critic_feedback = Column(Text, nullable=True)
 
     # HITL State
@@ -195,6 +206,11 @@ def _run_migrations():
             ("content_chunks", "subtopic_id", "INTEGER REFERENCES subtopics(id) ON DELETE SET NULL"),
             # Topics are now owned by a document, not a subject
             ("topics", "document_id", "VARCHAR REFERENCES documents(id) ON DELETE CASCADE"),
+            # Phase 2.5: atomic content columns on flashcards
+            ("flashcards", "question_type",        "VARCHAR(30) NOT NULL DEFAULT 'active_recall'"),
+            ("flashcards", "complexity_level",     "VARCHAR(10)"),
+            ("flashcards", "rubric",               "TEXT"),
+            ("flashcards", "critic_rubric_scores", "TEXT"),
         ]
 
         for table, column, col_def in migrations:

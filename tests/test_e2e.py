@@ -1,158 +1,245 @@
-import pytest
+"""
+tests/test_e2e.py
+------------------
+End-to-end test for the Phase 1 LangGraph workflow (current architecture).
+
+Architecture (as of PR #1 decoupling):
+  INDEXING:   Ingest → AssignTopic (TopicAssignerAgent) → NextPage → FlushQdrant
+  GENERATION: MatchTopics → Ingest → Generate (SocraticAgent) → Critic (CriticAgent) → Increment → END
+
+Mocking strategy:
+  - topic_assigner.assign_topic    → deterministic TopicAssignment (no LLM)
+  - _flush_qdrant_batch            → no-op (Qdrant not required for unit-style test)
+  - socratic_agent.generate_flashcard → writes a real Flashcard to DB, returns result dict
+  - critic_agent.evaluate_flashcard   → updates Flashcard score in DB, returns score dict
+"""
+
 import os
 import uuid
-import workflows.phase1_ingestion
+import json
+import pytest
 from unittest.mock import patch, MagicMock
 
-from core.database import SessionLocal, ContentChunk, Flashcard, Topic, Subtopic, Subject, Base, engine
-from agents.socratic import FlashcardOutput
-from agents.critic import GroundingEvaluation
-from agents.curator import DocumentStructure, TopicStructure, SubtopicStructure
+import workflows.phase1_ingestion
+from core.database import (
+    SessionLocal, ContentChunk, Flashcard,
+    Topic, Subtopic, Subject, Base, engine,
+    SubjectDocumentAssociation, Document as DBDocument,
+)
+from agents.topic_assigner import TopicAssignment
 
-# Ensure tables are built for tests
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
 @pytest.fixture(scope="function", autouse=True)
 def setup_db():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     yield
+    # Drop and recreate (not just drop) so subsequent test modules still have tables
+    Base.metadata.drop_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
+
 
 @pytest.fixture
-def mock_embeddings():
-    with patch('agents.ingestion.OpenAIEmbeddings') as MockEmbeddings:
-        instance = MockEmbeddings.return_value
-        instance.embed_documents.side_effect = lambda texts: [[0.1] * 1536 for _ in texts]
-        instance.embed_query.side_effect = lambda text: [0.1] * 1536
-        yield instance
-
-@pytest.fixture
-def mock_curator():
-    with patch.object(workflows.phase1_ingestion.curator_agent, 'chain') as mock_chain:
-        mock_chain.invoke.return_value = DocumentStructure(
-            summary="Test document summary",
-            topics=[
-                TopicStructure(
-                    name="Test Topic 1",
-                    summary="Description of Topic 1",
-                    subtopics=[
-                        SubtopicStructure(name="Subtopic A", summary="Summary A"),
-                        SubtopicStructure(name="Subtopic B", summary="Summary B")
-                    ]
-                )
-            ]
-        )
-        yield mock_chain
-
-@pytest.fixture
-def mock_socratic_chain():
-    with patch.object(workflows.phase1_ingestion.socratic_agent, 'chain') as mock_chain:
-        mock_chain.invoke.return_value = FlashcardOutput(
-            question="What is the concept discussed in the text?",
-            answer="AI Engineering hierarchical test."
-        )
-        yield mock_chain
-
-@pytest.fixture
-def mock_tesseract():
-    with patch('pytesseract.image_to_string') as mock_ocr:
-        mock_ocr.return_value = "Mocked OCR text."
-        yield mock_ocr
-
-@pytest.fixture
-def mock_critic():
-    with patch.object(workflows.phase1_ingestion.critic_agent, 'chain') as mock_chain:
-        mock_chain.invoke.return_value = GroundingEvaluation(
-            score=5,
-            feedback="Strongly grounded."
-        )
-        yield mock_chain
-
-@pytest.fixture
-def mock_classifier():
-    with patch('core.models.get_llm') as mock_get_llm:
-        mock_model = MagicMock()
-        mock_get_llm.return_value = mock_model
-        
-        class MockClassification:
-            subtopic_id = 1
-            
-        mock_model.with_structured_output.return_value.invoke.return_value = MockClassification()
-        
-        # Ensure title generation works whether called via .invoke() or directly (RunnableLambda)
-        mock_res = MagicMock()
-        mock_res.content = "Test Document Title"
-        mock_model.invoke.return_value = mock_res
-        mock_model.return_value = mock_res
-        
-        yield mock_model
-
-def test_e2e_hierarchical_workflow(mock_embeddings, mock_curator, mock_socratic_chain, mock_tesseract, mock_classifier, mock_critic):
-    """Verifies the expanded Phase 1 flow: Ingest -> Curate -> Generate -> Critic."""
-    file_path = os.path.join("documents", "gemini 3 developer guide march 2026.pdf")
-    doc_id = str(uuid.uuid4())
-    
-    # Ensure the directory exists for fitz
-    if not os.path.exists("documents"):
-        os.makedirs("documents")
-    
-    # Create a real dummy PDF so fitz doesn't complain during ingestion
+def dummy_pdf(tmp_path):
+    """Create a minimal PDF with embedded text so PyMuPDF can parse it."""
     import fitz
+    pdf_path = str(tmp_path / "test_e2e.pdf")
     doc = fitz.open()
     page = doc.new_page()
-    page.insert_text((50, 50), "Test content for E2E flow.")
-    doc.save(file_path)
+    page.insert_text(
+        (50, 50),
+        "Calculus is the mathematical study of continuous change. "
+        "The derivative measures instantaneous rate of change. "
+        "Integration is the inverse of differentiation and accumulates quantities.",
+    )
+    doc.save(pdf_path)
     doc.close()
-    
-    db = SessionLocal()
-    subject = Subject(name="Test Subject E2E")
-    db.add(subject)
-    db.commit()
-    subject_id = subject.id
-    db.close()
-    
-    initial_state = {
+    return pdf_path
+
+
+@pytest.fixture
+def mock_topic_assigner():
+    """Make TopicAssignerAgent return a deterministic assignment without LLM calls."""
+    assignment = TopicAssignment(
+        topic_name="Calculus",
+        subtopic_name="Derivatives",
+        reasoning="Chunk discusses rates of change.",
+    )
+    with patch.object(
+        workflows.phase1_ingestion.topic_assigner,
+        "assign_topic",
+        return_value=assignment,
+    ):
+        yield assignment
+
+
+@pytest.fixture
+def mock_qdrant():
+    """Suppress Qdrant batch flush — Qdrant not required for this test."""
+    with patch("workflows.phase1_ingestion._flush_qdrant_batch"):
+        yield
+
+
+@pytest.fixture
+def mock_title_llm():
+    """Suppress LLM title generation inside IngestionAgent.create_document_record."""
+    with patch("core.models.get_llm", side_effect=RuntimeError("skip title gen")):
+        yield
+
+
+def _make_state(mode, doc_id, subject_id=None, file_path=None, **overrides):
+    base = {
+        "mode": mode,
         "file_path": file_path,
         "doc_id": doc_id,
         "subject_id": subject_id,
+        "target_topics": [],
+        "question_type": "active_recall",
+        "total_pages": 1,
+        "current_page": 0,
         "chunks": [],
-        "hierarchy": [],
-        "doc_summary": "",
         "current_chunk_index": 0,
+        "hierarchy": [],
+        "pending_qdrant_docs": [],
+        "current_new_cards": [],
         "generated_flashcards": [],
-        "status_message": "Starting E2E Test"
+        "status_message": "start",
+        "matched_subtopic_ids": None,
     }
-    
-    try:
-        # Execute Graph
-        # We need to handle the fact that graph.stream/invoke might be used
-        final_state = workflows.phase1_ingestion.phase1_graph.invoke(initial_state)
-        
-        # Verify Hierarchy logic
-        assert len(final_state["hierarchy"]) == 1
-        assert final_state["hierarchy"][0]["name"] == "Test Topic 1"
-        assert len(final_state["hierarchy"][0]["subtopics"]) == 2
-        
-        # Verify DB persistence
-        db = SessionLocal()
-        try:
-            # Check Document table
-            from core.database import Document as DBDocument
-            db_doc = db.query(DBDocument).filter(DBDocument.id == doc_id).first()
-            assert db_doc is not None
-            assert db_doc.filename == "gemini 3 developer guide march 2026.pdf"
+    base.update(overrides)
+    return base
 
-            topic = db.query(Topic).filter(Topic.document_id == doc_id).first()
-            assert topic is not None
-            assert topic.name == "Test Topic 1"
-            
-            subtopic = db.query(Subtopic).filter(Subtopic.topic_id == topic.id).first()
-            assert subtopic is not None
-            
-            flashcard = db.query(Flashcard).filter(Flashcard.subtopic_id == subtopic.id).first()
-            assert flashcard is not None
-            assert flashcard.question == "What is the concept discussed in the text?"
-            assert flashcard.status == "pending"
-        finally:
-            db.close()
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+def test_e2e_indexing_creates_topics_and_chunks(
+    dummy_pdf, mock_topic_assigner, mock_qdrant, mock_title_llm
+):
+    """INDEXING mode: chunk → assign → persist Topic/Subtopic/ContentChunk in DB.
+
+    node_ingest creates the Document row itself when current_page == 0.
+    Do NOT pre-seed the Document — that causes a UNIQUE constraint collision.
+    """
+    doc_id = str(uuid.uuid4())
+    state = _make_state("INDEXING", doc_id, file_path=dummy_pdf)
+    workflows.phase1_ingestion.phase1_graph.invoke(state)
+
+    db = SessionLocal()
+    try:
+        # node_ingest creates the Document (content_hash-based dedup)
+        doc = db.query(DBDocument).first()
+        assert doc is not None, "node_ingest should have created a Document row"
+
+        actual_doc_id = doc.id
+        topics = db.query(Topic).filter(Topic.document_id == actual_doc_id).all()
+        assert len(topics) >= 1, "Expected at least 1 topic indexed"
+        assert topics[0].name == "Calculus"
+
+        subtopic = db.query(Subtopic).filter(Subtopic.topic_id == topics[0].id).first()
+        assert subtopic is not None
+        assert subtopic.name == "Derivatives"
+
+        chunks = db.query(ContentChunk).filter(ContentChunk.document_id == actual_doc_id).all()
+        assert len(chunks) >= 1, "Expected ContentChunk rows saved to DB"
     finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+        db.close()
+
+
+def test_e2e_generation_creates_flashcards(
+    dummy_pdf, mock_topic_assigner, mock_qdrant, mock_title_llm
+):
+    """GENERATION mode: after indexing, mocked agents produce Flashcard rows in DB."""
+    doc_id = str(uuid.uuid4())
+
+    # --- INDEXING first (populates Topics/Subtopics/Chunks) ---
+    index_state = _make_state("INDEXING", doc_id, file_path=dummy_pdf)
+    workflows.phase1_ingestion.phase1_graph.invoke(index_state)
+
+    # Retrieve the actual doc_id assigned by node_ingest (content_hash dedup may change it)
+    db = SessionLocal()
+    try:
+        actual_doc = db.query(DBDocument).first()
+        assert actual_doc is not None
+        actual_doc_id = actual_doc.id
+
+        subject = Subject(name=f"E2E-Gen-{uuid.uuid4().hex[:6]}")
+        db.add(subject)
+        db.commit()
+        subject_id = subject.id
+        db.add(SubjectDocumentAssociation(subject_id=subject_id, document_id=actual_doc_id))
+        db.commit()
+    finally:
+        db.close()
+
+    # --- Mock generation agents ---
+    def fake_generate(self_arg, chunk=None, subtopic_id=None, subject_id=None,
+                      question_type="active_recall", **kwargs):
+        s = SessionLocal()
+        try:
+            fc = Flashcard(
+                question="What does a derivative measure?",
+                answer="Instantaneous rate of change.",
+                question_type=question_type,
+                subtopic_id=subtopic_id,
+                subject_id=subject_id,
+                status="pending",
+            )
+            s.add(fc)
+            s.commit()
+            s.refresh(fc)
+            return {
+                "status": "success",
+                "flashcards": [{
+                    "flashcard_id": fc.id,
+                    "question": fc.question,
+                    "answer": fc.answer,
+                    "question_type": fc.question_type,
+                    "suggested_complexity": "medium",
+                }],
+            }
+        finally:
+            s.close()
+
+    def fake_evaluate(flashcard_id=None, source_text="",
+                      question="", answer=""):
+        s = SessionLocal()
+        try:
+            fc = s.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
+            if fc:
+                fc.critic_score = 4
+                fc.critic_feedback = "Well grounded."
+                fc.critic_rubric_scores = json.dumps(
+                    {"accuracy": 4, "logic": 4, "grounding": 4, "clarity": 4}
+                )
+                fc.complexity_level = "medium"
+                s.commit()
+            return {"flashcard_id": flashcard_id, "score": 4, "feedback": "Well grounded."}
+        finally:
+            s.close()
+
+    with patch.object(workflows.phase1_ingestion.socratic_agent, "generate_flashcard", fake_generate), \
+         patch.object(workflows.phase1_ingestion.critic_agent, "evaluate_flashcard", fake_evaluate):
+
+        gen_state = _make_state(
+            "GENERATION", actual_doc_id, subject_id=subject_id,
+            file_path=None, total_pages=0, current_page=0,
+        )
+        workflows.phase1_ingestion.phase1_graph.invoke(gen_state)
+
+    db = SessionLocal()
+    try:
+        flashcards = db.query(Flashcard).filter(Flashcard.subject_id == subject_id).all()
+        assert len(flashcards) >= 1, "Expected at least 1 Flashcard in DB after generation"
+        fc = flashcards[0]
+        assert fc.question == "What does a derivative measure?"
+        assert fc.status == "pending"
+        assert fc.question_type == "active_recall"
+        assert fc.critic_score == 4
+    finally:
+        db.close()

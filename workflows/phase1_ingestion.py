@@ -27,6 +27,7 @@ class GraphState(TypedDict):
     doc_id: str
     subject_id: Optional[int] # Only for GENERATION
     target_topics: List[str]  # Only for GENERATION
+    question_type: str        # Card type for GENERATION (default: "active_recall")
 
     # State tracking
     total_pages: int
@@ -341,6 +342,7 @@ def node_generate(state: GraphState):
         state["doc_id"], chunk_doc,
         subtopic_id=chunk_data["subtopic_id"],
         subject_id=subject_id,
+        question_type=state.get("question_type", "active_recall"),
     )
 
     new_cards = []

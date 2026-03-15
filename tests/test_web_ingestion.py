@@ -1,14 +1,30 @@
+"""
+tests/test_web_ingestion.py
+-----------------------------
+Integration test for the Phase 2 web ingestion LangGraph workflow.
+
+Document → Subject relationship is through SubjectDocumentAssociation,
+not a direct subject_id column on Document. The DB assertion is updated
+to query via the association table.
+"""
+
 import pytest
 import uuid
 from unittest.mock import MagicMock, patch
-from core.database import SessionLocal, Subject, Document, Flashcard
+
+from core.database import (
+    SessionLocal, Subject, Document,
+    SubjectDocumentAssociation, Flashcard,
+)
 from workflows.phase2_web_ingestion import phase2_graph
+
 
 @pytest.fixture
 def db():
     session = SessionLocal()
     yield session
     session.close()
+
 
 @patch("agents.safety.SafetyAgent.check_subject_safety")
 @patch("agents.web_researcher.WebResearchAgent.research_topics")
@@ -40,15 +56,15 @@ def test_web_ingestion_workflow(
                 "title": "Test Page",
                 "domain": "example_test.com",
                 "content": "This is test content for web research.",
-                "content_hash": "hash123"
-            }
+                "content_hash": "hash123",
+            },
         )
     ]
 
     # Mock curator returns hierarchy
     mock_curator.return_value = {
         "hierarchy": [{"name": "Topic 1", "subtopics": [{"id": 1, "name": "Sub 1", "summary": "..."}]}],
-        "doc_summary": "Summary..."
+        "doc_summary": "Summary...",
     }
 
     # Mock socratic returns a flashcard
@@ -56,7 +72,7 @@ def test_web_ingestion_workflow(
         "flashcard_id": 1,
         "question": "Web test question?",
         "answer": "Web test answer.",
-        "status": "success"
+        "status": "success",
     }
 
     initial_state = {
@@ -81,14 +97,20 @@ def test_web_ingestion_workflow(
     # 2. Execute
     final_state = phase2_graph.invoke(initial_state)
 
-    # 3. Verify
+    # 3. Verify workflow outcomes
     assert final_state["safety_blocked"] is False
     assert len(final_state["processed_urls"]) == 1
     assert len(final_state["generated_flashcards"]) > 0
-    
-    # Check if document was saved to DB
-    doc = db.query(Document).filter(Document.subject_id == subject.id).first()
-    assert doc is not None
+
+    # 4. Verify Document saved to DB via SubjectDocumentAssociation
+    #    (Document has no direct subject_id column — link is through the association table)
+    assoc = db.query(SubjectDocumentAssociation).filter(
+        SubjectDocumentAssociation.subject_id == subject.id
+    ).first()
+    assert assoc is not None, "Expected a SubjectDocumentAssociation row for this subject"
+
+    doc = db.query(Document).filter(Document.id == assoc.document_id).first()
+    assert doc is not None, "Expected a Document row linked to the subject"
     assert doc.source_type == "web"
     assert doc.source_url == "https://example_test.com/page1"
 

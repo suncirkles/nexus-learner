@@ -455,10 +455,26 @@ def _render_upload_tab(db, subject_id: int, subject_name: str):
     else:
         st.caption("Select specific topics to generate cards for this subject.")
         selected_topics = st.multiselect("Select Topics:", topic_list, key=f"gen_topics_{subject_id}")
-        
+
         # Also allow manual text input for similarity matching
         manual_topics = st.text_input("OR Enter topics manually (comma separated):", key=f"manual_topics_{subject_id}")
-        
+
+        _QTYPE_LABELS = {
+            "Active Recall":    "active_recall",
+            "Fill in the Blank": "fill_blank",
+            "Short Answer":     "short_answer",
+            "Long Answer":      "long_answer",
+            "Numerical":        "numerical",
+            "Scenario":         "scenario",
+        }
+        selected_qtype_label = st.selectbox(
+            "Question Type",
+            list(_QTYPE_LABELS.keys()),
+            key=f"qtype_{subject_id}",
+            help="Determines the format of the generated flashcards.",
+        )
+        selected_question_type = _QTYPE_LABELS[selected_qtype_label]
+
         if st.button("🔥 Process and Generate Cards", key=f"btn_gen_{subject_id}"):
             final_target_topics = selected_topics
             if manual_topics:
@@ -475,6 +491,7 @@ def _render_upload_tab(db, subject_id: int, subject_name: str):
                         "doc_id": doc.id,
                         "subject_id": subject_id,
                         "target_topics": final_target_topics,
+                        "question_type": selected_question_type,
                         "chunks": [],
                         "current_chunk_index": 0,
                         "generated_flashcards": [],
@@ -896,6 +913,14 @@ def render_mentor_review():
         m_tabs = st.tabs(["⏳ Pending Review", "✅ Approved Items", "🗑️ Review Bin"])
 
         with m_tabs[0]:
+            # Type filter — mentor can focus on specific question formats
+            _ALL_QTYPES = ["active_recall", "fill_blank", "short_answer", "long_answer", "numerical", "scenario"]
+            type_filter = st.multiselect(
+                "Filter by Question Type (empty = show all)",
+                _ALL_QTYPES,
+                key="pending_type_filter",
+            )
+
             subjects = db.query(Subject).filter(Subject.is_archived == False).all()
             if not subjects:
                 st.info("No materials available for review.")
@@ -939,7 +964,10 @@ def render_mentor_review():
                                     st.rerun()
 
                                 for sub in subtopics:
-                                    pending_fcs = db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").all()
+                                    _pq = db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending")
+                                    if type_filter:
+                                        _pq = _pq.filter(Flashcard.question_type.in_(type_filter))
+                                    pending_fcs = _pq.all()
                                     if pending_fcs:
                                         with st.container(border=True):
                                             st.markdown(f"#### 📖 {sub.name} ({len(pending_fcs)} Pending)")
@@ -1033,11 +1061,30 @@ def render_flashcard_review_card(db, fc, current_status):
     fc_answer = fc.answer
     fc_critic_score = fc.critic_score or 0
     fc_critic_feedback = fc.critic_feedback or ""
+    fc_question_type = getattr(fc, "question_type", None) or "active_recall"
+    fc_chunk_id = getattr(fc, "chunk_id", None)
+    fc_rubric_json = getattr(fc, "rubric", None)
+    fc_rubric_scores_json = getattr(fc, "critic_rubric_scores", None)
+    # Pre-populated complexity from Critic suggestion (confirmed by Mentor on approve)
+    fc_complexity = getattr(fc, "complexity_level", None) or "(unset)"
+
+    # --- Question type badge ---
+    _QTYPE_DISPLAY = {
+        "active_recall": "Active Recall",
+        "fill_blank": "Fill in the Blank",
+        "short_answer": "Short Answer",
+        "long_answer": "Long Answer",
+        "numerical": "Numerical",
+        "scenario": "Scenario",
+    }
+    qtype_label = _QTYPE_DISPLAY.get(fc_question_type, fc_question_type)
+
+    # --- Critic score display ---
     # H16: surface low-quality auto-accepted cards so mentors can spot them
     score_label = (
-        f"⚠️ {fc_critic_score}/5 low quality"
-        if fc_critic_score and fc_critic_score < 3
-        else f"{fc_critic_score}/5"
+        f"⚠️ {fc_critic_score}/4 low quality"
+        if fc_critic_score and fc_critic_score < 2
+        else f"{fc_critic_score}/4"
     )
 
     source_badge = _get_flashcard_source_badge(db, fc)
@@ -1045,11 +1092,18 @@ def render_flashcard_review_card(db, fc, current_status):
         f"<div style='margin-top:6px;'>{source_badge}</div>"
         if source_badge else ""
     )
+
     st.markdown(f"""
     <div class='stCard'>
-        <div style='display:flex; justify-content:space-between;'>
+        <div style='display:flex; justify-content:space-between; align-items:center;'>
             <strong>Question:</strong>
-            <span class='critic-score'>Score: {score_label}</span>
+            <div style='display:flex; gap:8px; align-items:center;'>
+                <span style='font-size:0.75rem; background:#1f3a5c; color:#58a6ff;
+                             padding:2px 8px; border-radius:12px; font-weight:600;'>
+                    {qtype_label}
+                </span>
+                <span class='critic-score'>Score: {score_label}</span>
+            </div>
         </div>
         <p>{fc_question}</p>
         <hr style='border-top: 1px solid #30363d; margin: 10px 0;'/>
@@ -1062,14 +1116,60 @@ def render_flashcard_review_card(db, fc, current_status):
     </div>
     """, unsafe_allow_html=True)
 
+    # --- 4-score breakdown (accuracy / logic / grounding / clarity) ---
+    if fc_rubric_scores_json:
+        try:
+            import json as _json
+            rs = _json.loads(fc_rubric_scores_json)
+            score_cols = st.columns(4)
+            for col, (label, key) in zip(score_cols, [
+                ("Accuracy", "accuracy"), ("Logic", "logic"),
+                ("Grounding", "grounding"), ("Clarity", "clarity"),
+            ]):
+                val = rs.get(key, "—")
+                col.metric(label, f"{val}/4")
+        except Exception:
+            pass
+
+    # --- Source snippet panel ---
+    if fc_chunk_id:
+        chunk = db.query(ContentChunk).filter(ContentChunk.id == fc_chunk_id).first()
+        if chunk:
+            with st.expander("📄 Source Snippet"):
+                st.caption("Original source text this card was generated from:")
+                st.text(chunk.text[:1500] + ("…" if len(chunk.text) > 1500 else ""))
+
+    # --- Rubric panel ---
+    if fc_rubric_json:
+        try:
+            import json as _json
+            rubric_items = _json.loads(fc_rubric_json)
+            with st.expander("📋 Grading Rubric"):
+                for item in rubric_items:
+                    st.markdown(f"**{item.get('criterion', '?')}** — {item.get('description', '')}")
+        except Exception:
+            pass
+
     cols = st.columns([0.15, 0.15, 0.15, 0.55])
 
     if current_status == "pending":
+        # Complexity tagger — pre-populated by Critic, confirmed by Mentor on approve
+        complexity_key = f"complexity_{fc_id}"
+        complexity_options = ["(unset)", "simple", "medium", "complex"]
+        default_idx = complexity_options.index(fc_complexity) if fc_complexity in complexity_options else 0
+        selected_complexity = st.selectbox(
+            "Complexity",
+            complexity_options,
+            index=default_idx,
+            key=complexity_key,
+        )
+
         if cols[0].button("Approve", key=f"p_app_{fc_id}"):
             with get_session() as _db:
                 _fc = _db.query(Flashcard).filter(Flashcard.id == fc_id).first()
                 if _fc:
                     _fc.status = "approved"
+                    _fc.complexity_level = None if selected_complexity == "(unset)" else selected_complexity
                     _db.commit()
             st.rerun()
         if cols[1].button("Reject", key=f"p_rej_{fc_id}"):

@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     # API Keys
     OPENAI_API_KEY: str = ""
     ANTHROPIC_API_KEY: str = ""
+    GROQ_API_KEY: str = ""
+    GOOGLE_API_KEY: str = ""            # Google AI Studio (Gemini)
     LANGCHAIN_API_KEY: str = ""
     
     # LangSmith Tracing
@@ -19,9 +21,11 @@ class Settings(BaseSettings):
     LANGCHAIN_PROJECT: str = "nexus_learner_mvp"
     
     # Models Config
-    DEFAULT_LLM_PROVIDER: str = "openai" # "openai" or "anthropic"
+    DEFAULT_LLM_PROVIDER: str = "openai"  # "openai" | "anthropic" | "groq" | "google"
     PRIMARY_MODEL: str = "gpt-4o"
     ROUTING_MODEL: str = "gpt-4o-mini"
+    GEMINI_PRIMARY_MODEL: str = "gemini-2.0-flash"     # 1500 RPD free tier; swap to gemini-2.5-flash for quality (25 RPD only)
+    GEMINI_ROUTING_MODEL: str = "gemini-2.0-flash"     # same; 2.5-flash has 25 RPD — too low for routing volume
     
     # Database
     DB_URL: str = "sqlite:///./nexus.db"
@@ -40,6 +44,19 @@ class Settings(BaseSettings):
     LOG_FILE: str = "nexus_learner.log"
     LOG_MAX_BYTES: int = 10_485_760   # 10 MB per file
     LOG_BACKUP_COUNT: int = 5         # Keep 5 rotated files
+
+    # Rate limiting
+    GENERATION_CHUNK_DELAY: float = 1.0   # seconds to sleep between chunks in background generation
+    LLM_MAX_RETRIES: int = 4              # max retry attempts on rate limit errors
+    LLM_RETRY_BASE_DELAY: float = 5.0    # initial backoff delay in seconds (doubles each retry)
+
+    # Page image cache (rendered PNG per PDF page; used by Source Snippet panel)
+    PAGE_CACHE_DIR: str = "page_cache"   # relative to project root; created on first use
+
+    # Chunking Settings
+    CHUNK_SIZE: int = 3000            # math-aware separators split at ~paragraph level
+    CHUNK_OVERLAP: int = 400          # less critical now; generation uses full subtopic context
+    MAX_SUBTOPIC_CHARS: int = 12000   # max chars fed to Socratic per subtopic (≈3k tokens)
 
     # Web Scraping Settings
     WEB_SCRAPE_TIMEOUT: int = 10            # HTTP request timeout seconds

@@ -56,25 +56,27 @@ if TYPE_CHECKING:
 
 TIER_MODELS: dict[str, list[str]] = {
     "fast": [
-        "groq/llama-3.3-70b-versatile",
+        "anthropic/claude-sonnet-4-6",          # Sonnet 4.6 — confirmed working structured output
+        "groq/llama-3.3-70b-versatile",         # Groq free tier fallback
         "gemini/gemini-2.0-flash",
-        "anthropic/claude-haiku-4-5-20251001",
+        # claude-haiku-4-5-20251001: structured output broken via LiteLLM (empty responses)
+        # Restore once scripts/test_haiku_structured_output.py confirms the fix
     ],
     "balanced": [
+        "anthropic/claude-sonnet-4-6",           # paid tier — prioritised
         "gemini/gemini-2.0-flash",
-        "anthropic/claude-sonnet-4-6",
         "deepseek/deepseek-chat",
         "openai/gpt-4o",
     ],
     "reasoning": [
+        "anthropic/claude-sonnet-4-6",           # paid tier — prioritised
         "groq/deepseek-r1-distill-llama-70b",   # DeepSeek-R1 on Groq free tier
-        "anthropic/claude-sonnet-4-6",
         "openai/o3-mini",
     ],
     "quality": [
         "anthropic/claude-opus-4-6",
-        "openai/gpt-4o",
         "anthropic/claude-sonnet-4-6",
+        "openai/gpt-4o",
     ],
 }
 
@@ -117,7 +119,7 @@ def _pick_model_for_tier(tier: str) -> str:
         for prefix, env_vars in KEY_MAP.items():
             if model.startswith(prefix):
                 if any(os.environ.get(v) for v in env_vars):
-                    print(f"  [model_hop] tier={tier!r} → {model}")
+                    print(f"  [model_hop] tier={tier!r} -> {model}")
                     return model
                 break
     tried = ", ".join(candidates)

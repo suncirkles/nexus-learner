@@ -32,8 +32,11 @@ st.set_page_config(page_title="Nexus Learner - Agentic Learning Platform", layou
 
 logger = logging.getLogger(__name__)
 
-# Initialize Qdrant Client for admin tasks
-qdrant_client = QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY)
+# Lazy-init Qdrant client — first call is deferred until it's actually needed,
+# avoiding the network handshake that was blocking startup.
+@st.cache_resource
+def get_qdrant_client() -> QdrantClient:
+    return QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY)
 
 # Custom CSS for Premium Look & Fixed Button Sizing
 st.markdown("""
@@ -113,7 +116,7 @@ def reset_entire_system():
     Base.metadata.create_all(bind=engine)
 
     try:
-        qdrant_client.delete_collection(collection_name=settings.QDRANT_COLLECTION_NAME)
+        get_qdrant_client().delete_collection(collection_name=settings.QDRANT_COLLECTION_NAME)
     except Exception as e:
         st.error(f"Failed to clear Qdrant: {e}")
 
@@ -163,7 +166,7 @@ def delete_topic_data(topic_id: int, document_id: str):
         # Qdrant Cleanup
         try:
             from qdrant_client.http import models as rest
-            qdrant_client.delete(
+            get_qdrant_client().delete(
                 collection_name=settings.QDRANT_COLLECTION_NAME,
                 points_selector=rest.FilterSelector(
                     filter=rest.Filter(
@@ -205,7 +208,6 @@ def _get_flashcard_source_attribution(db, fc) -> str:
     return ""
 
 
-@st.fragment
 def render_flashcard_list(sub_id, status="approved"):
     db = SessionLocal()
     try:
@@ -308,6 +310,17 @@ def _render_topic_input_section(subject_id: int, suffix: str):
 
 # --- Tab Renderers ---
 
+@st.cache_data(ttl=30)
+def _get_global_flashcard_stats() -> tuple:
+    """Returns (total, approved, pending, rejected) counts. Cached for 30 s."""
+    with get_session() as db:
+        total    = db.query(func.count(Flashcard.id)).scalar() or 0
+        approved = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "approved").scalar() or 0
+        pending  = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "pending").scalar() or 0
+        rejected = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "rejected").scalar() or 0
+    return total, approved, pending, rejected
+
+
 def render_dashboard():
     st.header("🏠 Agentic Learning Dashboard")
     try:
@@ -378,14 +391,12 @@ def render_dashboard():
                                 if "study_topic_id" in st.session_state: del st.session_state.study_topic_id
                                 if "study_subtopic_id" in st.session_state: del st.session_state.study_subtopic_id
                                 st.session_state.active_nav = "🧠 Learner"
+                                st.session_state.sidebar_nav = "🧠 Learner"
                                 st.rerun()
 
         with col_stats:
             st.subheader("Global Stats")
-            total_q = db.query(func.count(Flashcard.id)).scalar()
-            approved_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "approved").scalar()
-            pending_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "pending").scalar()
-            rejected_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "rejected").scalar()
+            total_q, approved_q, pending_q, rejected_q = _get_global_flashcard_stats()
             
             st.metric("Approved (Study Ready)", approved_q)
             st.metric("Pending Review", pending_q)
@@ -455,10 +466,26 @@ def _render_upload_tab(db, subject_id: int, subject_name: str):
     else:
         st.caption("Select specific topics to generate cards for this subject.")
         selected_topics = st.multiselect("Select Topics:", topic_list, key=f"gen_topics_{subject_id}")
-        
+
         # Also allow manual text input for similarity matching
         manual_topics = st.text_input("OR Enter topics manually (comma separated):", key=f"manual_topics_{subject_id}")
-        
+
+        _QTYPE_LABELS = {
+            "Active Recall":    "active_recall",
+            "Fill in the Blank": "fill_blank",
+            "Short Answer":     "short_answer",
+            "Long Answer":      "long_answer",
+            "Numerical":        "numerical",
+            "Scenario":         "scenario",
+        }
+        selected_qtype_label = st.selectbox(
+            "Question Type",
+            list(_QTYPE_LABELS.keys()),
+            key=f"qtype_{subject_id}",
+            help="Determines the format of the generated flashcards.",
+        )
+        selected_question_type = _QTYPE_LABELS[selected_qtype_label]
+
         if st.button("🔥 Process and Generate Cards", key=f"btn_gen_{subject_id}"):
             final_target_topics = selected_topics
             if manual_topics:
@@ -475,6 +502,7 @@ def _render_upload_tab(db, subject_id: int, subject_name: str):
                         "doc_id": doc.id,
                         "subject_id": subject_id,
                         "target_topics": final_target_topics,
+                        "question_type": selected_question_type,
                         "chunks": [],
                         "current_chunk_index": 0,
                         "generated_flashcards": [],
@@ -517,7 +545,7 @@ def render_knowledge_library():
                             # orphaned embeddings linger in the vector store.
                             try:
                                 from qdrant_client.http import models as rest
-                                qdrant_client.delete(
+                                get_qdrant_client().delete(
                                     collection_name=settings.QDRANT_COLLECTION_NAME,
                                     points_selector=rest.FilterSelector(
                                         filter=rest.Filter(
@@ -896,6 +924,14 @@ def render_mentor_review():
         m_tabs = st.tabs(["⏳ Pending Review", "✅ Approved Items", "🗑️ Review Bin"])
 
         with m_tabs[0]:
+            # Type filter — mentor can focus on specific question formats
+            _ALL_QTYPES = ["active_recall", "fill_blank", "short_answer", "long_answer", "numerical", "scenario"]
+            type_filter = st.multiselect(
+                "Filter by Question Type (empty = show all)",
+                _ALL_QTYPES,
+                key="pending_type_filter",
+            )
+
             subjects = db.query(Subject).filter(Subject.is_archived == False).all()
             if not subjects:
                 st.info("No materials available for review.")
@@ -939,7 +975,10 @@ def render_mentor_review():
                                     st.rerun()
 
                                 for sub in subtopics:
-                                    pending_fcs = db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending").all()
+                                    _pq = db.query(Flashcard).filter(Flashcard.subtopic_id == sub.id, Flashcard.status == "pending")
+                                    if type_filter:
+                                        _pq = _pq.filter(Flashcard.question_type.in_(type_filter))
+                                    pending_fcs = _pq.all()
                                     if pending_fcs:
                                         with st.container(border=True):
                                             st.markdown(f"#### 📖 {sub.name} ({len(pending_fcs)} Pending)")
@@ -1033,11 +1072,30 @@ def render_flashcard_review_card(db, fc, current_status):
     fc_answer = fc.answer
     fc_critic_score = fc.critic_score or 0
     fc_critic_feedback = fc.critic_feedback or ""
+    fc_question_type = getattr(fc, "question_type", None) or "active_recall"
+    fc_chunk_id = getattr(fc, "chunk_id", None)
+    fc_rubric_json = getattr(fc, "rubric", None)
+    fc_rubric_scores_json = getattr(fc, "critic_rubric_scores", None)
+    # Pre-populated complexity from Critic suggestion (confirmed by Mentor on approve)
+    fc_complexity = getattr(fc, "complexity_level", None) or "(unset)"
+
+    # --- Question type badge ---
+    _QTYPE_DISPLAY = {
+        "active_recall": "Active Recall",
+        "fill_blank": "Fill in the Blank",
+        "short_answer": "Short Answer",
+        "long_answer": "Long Answer",
+        "numerical": "Numerical",
+        "scenario": "Scenario",
+    }
+    qtype_label = _QTYPE_DISPLAY.get(fc_question_type, fc_question_type)
+
+    # --- Critic score display (1-4 scale) ---
     # H16: surface low-quality auto-accepted cards so mentors can spot them
     score_label = (
-        f"⚠️ {fc_critic_score}/5 low quality"
-        if fc_critic_score and fc_critic_score < 3
-        else f"{fc_critic_score}/5"
+        f"⚠️ {fc_critic_score}/4 low quality"
+        if fc_critic_score and fc_critic_score < 2
+        else f"{fc_critic_score}/4"
     )
 
     source_badge = _get_flashcard_source_badge(db, fc)
@@ -1045,11 +1103,18 @@ def render_flashcard_review_card(db, fc, current_status):
         f"<div style='margin-top:6px;'>{source_badge}</div>"
         if source_badge else ""
     )
+
     st.markdown(f"""
     <div class='stCard'>
-        <div style='display:flex; justify-content:space-between;'>
+        <div style='display:flex; justify-content:space-between; align-items:center;'>
             <strong>Question:</strong>
-            <span class='critic-score'>Score: {score_label}</span>
+            <div style='display:flex; gap:8px; align-items:center;'>
+                <span style='font-size:0.75rem; background:#1f3a5c; color:#58a6ff;
+                             padding:2px 8px; border-radius:12px; font-weight:600;'>
+                    {qtype_label}
+                </span>
+                <span class='critic-score'>Score: {score_label}</span>
+            </div>
         </div>
         <p>{fc_question}</p>
         <hr style='border-top: 1px solid #30363d; margin: 10px 0;'/>
@@ -1062,14 +1127,95 @@ def render_flashcard_review_card(db, fc, current_status):
     </div>
     """, unsafe_allow_html=True)
 
+    # --- 4-score breakdown (accuracy / logic / grounding / clarity) ---
+    if fc_rubric_scores_json:
+        try:
+            import json as _json
+            rs = _json.loads(fc_rubric_scores_json)
+            score_cols = st.columns(4)
+            for col, (label, key) in zip(score_cols, [
+                ("Accuracy", "accuracy"), ("Logic", "logic"),
+                ("Grounding", "grounding"), ("Clarity", "clarity"),
+            ]):
+                val = rs.get(key, "—")
+                col.metric(label, f"{val}/4")
+        except Exception:
+            pass
+
+    # --- Source snippet panel ---
+    if fc_chunk_id:
+        chunk = db.query(ContentChunk).filter(ContentChunk.id == fc_chunk_id).first()
+        if chunk:
+            import html as _html
+            page_num = getattr(chunk, "page_number", None)
+            doc_id_for_img = chunk.document_id
+            img_path = (
+                os.path.join("page_cache", f"{doc_id_for_img}_p{page_num:04d}.png")
+                if page_num is not None and doc_id_for_img
+                else None
+            )
+            has_image = img_path and os.path.exists(img_path)
+
+            if has_image:
+                import base64 as _b64
+                with open(img_path, "rb") as _f:
+                    _img_b64 = _b64.b64encode(_f.read()).decode()
+                st.markdown(
+                    f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Page</summary>"
+                    f"<img src='data:image/png;base64,{_img_b64}' "
+                    f"style='width:100%; margin-top:8px; border-radius:4px;'/>"
+                    f"<div style='font-size:0.75rem; color:#8b949e; margin-top:4px;'>"
+                    f"Page {page_num + 1}</div></details>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                snippet = chunk.text[:1500] + ("…" if len(chunk.text) > 1500 else "")
+                st.markdown(
+                    f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Snippet</summary>"
+                    f"<pre style='white-space:pre-wrap; font-size:0.8rem; margin-top:8px;'>"
+                    f"{_html.escape(snippet)}</pre></details>",
+                    unsafe_allow_html=True,
+                )
+
+    # --- Rubric panel ---
+    if fc_rubric_json:
+        try:
+            import json as _json
+            import html as _html
+            rubric_items = _json.loads(fc_rubric_json)
+            rows = "".join(
+                f"<p style='margin:4px 0;'><strong>{_html.escape(item.get('criterion','?'))}</strong>"
+                f" — {_html.escape(item.get('description',''))}</p>"
+                for item in rubric_items
+            )
+            st.markdown(
+                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📋 Grading Rubric</summary>"
+                f"<div style='margin-top:8px;'>{rows}</div></details>",
+                unsafe_allow_html=True,
+            )
+        except Exception:
+            pass
+
     cols = st.columns([0.15, 0.15, 0.15, 0.55])
 
     if current_status == "pending":
+        # Complexity tagger — pre-populated by Critic, confirmed by Mentor on approve
+        complexity_key = f"complexity_{fc_id}"
+        complexity_options = ["(unset)", "simple", "medium", "complex"]
+        default_idx = complexity_options.index(fc_complexity) if fc_complexity in complexity_options else 0
+        selected_complexity = st.selectbox(
+            "Complexity",
+            complexity_options,
+            index=default_idx,
+            key=complexity_key,
+        )
+
         if cols[0].button("Approve", key=f"p_app_{fc_id}"):
             with get_session() as _db:
                 _fc = _db.query(Flashcard).filter(Flashcard.id == fc_id).first()
                 if _fc:
                     _fc.status = "approved"
+                    _fc.complexity_level = None if selected_complexity == "(unset)" else selected_complexity
                     _db.commit()
             st.rerun()
         if cols[1].button("Reject", key=f"p_rej_{fc_id}"):
@@ -1342,21 +1488,20 @@ def main():
     
     nav_options = ["🏠 Dashboard", "📂 Knowledge Library", "📚 Study Materials", "👨‍🏫 Mentor Review", "🧠 Learner", "⚙️ System Tools"]
     
-    # Initialize navigation state
-    if "active_nav" not in st.session_state:
-        st.session_state.active_nav = nav_options[0]
-        
-    # Sync navigation with sidebar
-    active_nav = st.sidebar.radio("Navigation", nav_options, index=nav_options.index(st.session_state.active_nav), key="sidebar_nav")
-    
-    # If user manually clicks sidebar, update state
-    if active_nav != st.session_state.active_nav:
-        st.session_state.active_nav = active_nav
+    # Initialize navigation widget state (first run only)
+    if "sidebar_nav" not in st.session_state:
+        st.session_state.sidebar_nav = nav_options[0]
+
+    # Radio is the single source of truth — no index override needed
+    active_nav = st.sidebar.radio("Navigation", nav_options, key="sidebar_nav")
+
+    # Always keep active_nav in sync with the radio
+    st.session_state.active_nav = active_nav
 
     # --- Active Background Processes UI ---
     from core.background import background_tasks, stop_background_task, _lock as _bg_lock2
 
-    @st.fragment(run_every=3) # Refresh every 3 seconds if active
+    @st.fragment
     def render_background_monitor():
         with _bg_lock2:
             active_tasks = {id: task for id, task in background_tasks.items() if task.get("status") in ["processing", "failed"]}  # H2: snapshot under lock

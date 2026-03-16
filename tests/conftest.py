@@ -10,6 +10,12 @@ a 10M TPM limit and is sufficient for correctness tests.
 import os
 import uuid
 import pytest
+from dotenv import load_dotenv
+
+# Load .env into os.environ so model_hop.py (which reads os.environ directly)
+# can see GROQ_API_KEY, DEEPSEEK_API_KEY, GOOGLE_API_KEY, etc.
+# override=False preserves any existing env vars (e.g. CI secrets).
+load_dotenv(override=False)
 
 # ── Model override ────────────────────────────────────────────────────────────
 # Must happen before any agent or workflow module is imported so that
@@ -49,6 +55,7 @@ def indexed_doc():
         "doc_id": doc_id,
         "subject_id": None,
         "target_topics": [],
+        "question_type": "active_recall",
         "total_pages": MAX_PAGES,
         "current_page": 0,
         "chunks": [],
@@ -106,6 +113,7 @@ def generated_cards(indexed_doc):
         "doc_id": doc_id,
         "subject_id": subject_id,
         "target_topics": [],
+        "question_type": "active_recall",
         "total_pages": 0,
         "current_page": 0,
         "chunks": [],

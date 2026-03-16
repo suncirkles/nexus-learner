@@ -7,7 +7,7 @@ Agent for determining the relevance of content chunks to specific topics.
 import logging
 from typing import List, Optional
 from pydantic import BaseModel, Field
-from core.models import get_llm
+from core.models import call_structured
 from langchain_core.prompts import ChatPromptTemplate
 
 logger = logging.getLogger(__name__)
@@ -19,7 +19,7 @@ class RelevanceScore(BaseModel):
 
 class RelevanceAgent:
     def __init__(self):
-        self.llm = get_llm(purpose="routing").with_structured_output(RelevanceScore)
+        pass
 
     def check_relevance(self, chunk_text: str, target_topics: List[str]) -> RelevanceScore:
         """Determines if the chunk_text is relevant to any of the target_topics."""
@@ -41,10 +41,14 @@ Rules:
         ])
 
         try:
-            result = self.llm.invoke(prompt.format(
-                topics=", ".join(target_topics),
-                text=chunk_text[:2000] # Limit context for speed/cost
-            ))
+            result = call_structured(
+                RelevanceScore,
+                prompt.format(topics=", ".join(target_topics), text=chunk_text[:2000]),
+                purpose="routing",
+            )
+            if result is None:
+                logger.warning("call_structured returned None for relevance check — defaulting to relevant")
+                return RelevanceScore(is_relevant=True, matched_topic=None, reasoning="Quota exhausted — defaulting to relevant")
             return result
         except Exception as e:
             logger.error(f"Error checking relevance: {e}")

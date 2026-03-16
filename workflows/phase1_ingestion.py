@@ -27,6 +27,7 @@ class GraphState(TypedDict):
     doc_id: str
     subject_id: Optional[int] # Only for GENERATION
     target_topics: List[str]  # Only for GENERATION
+    question_type: str        # Card type for GENERATION (default: "active_recall")
 
     # State tracking
     total_pages: int
@@ -53,12 +54,49 @@ class GraphState(TypedDict):
     generated_flashcards: List[Dict[str, Any]]
     status_message: str
 
-# 2. Initialize Agents
-ingestion_agent = IngestionAgent()
-topic_assigner = TopicAssignerAgent()
-topic_matcher = TopicMatcherAgent()
-socratic_agent = SocraticAgent()
-critic_agent = CriticAgent()
+# 2. Lazy-init Agents — deferred until first graph execution so imports of
+#    this module (e.g. `from workflows.phase1_ingestion import phase1_graph`)
+#    no longer block startup with embedding-model loading.
+_ingestion_agent: "IngestionAgent | None" = None
+_topic_assigner: "TopicAssignerAgent | None" = None
+_topic_matcher: "TopicMatcherAgent | None" = None
+_socratic_agent: "SocraticAgent | None" = None
+_critic_agent: "CriticAgent | None" = None
+
+
+def _ingestion() -> "IngestionAgent":
+    global _ingestion_agent
+    if _ingestion_agent is None:
+        _ingestion_agent = IngestionAgent()
+    return _ingestion_agent
+
+
+def _assigner() -> "TopicAssignerAgent":
+    global _topic_assigner
+    if _topic_assigner is None:
+        _topic_assigner = TopicAssignerAgent()
+    return _topic_assigner
+
+
+def _matcher() -> "TopicMatcherAgent":
+    global _topic_matcher
+    if _topic_matcher is None:
+        _topic_matcher = TopicMatcherAgent()
+    return _topic_matcher
+
+
+def _socratic() -> "SocraticAgent":
+    global _socratic_agent
+    if _socratic_agent is None:
+        _socratic_agent = SocraticAgent()
+    return _socratic_agent
+
+
+def _critic() -> "CriticAgent":
+    global _critic_agent
+    if _critic_agent is None:
+        _critic_agent = CriticAgent()
+    return _critic_agent
 
 # 3. Define Nodes
 
@@ -112,7 +150,7 @@ def node_match_topics(state: GraphState):
         f"TopicMatcher: matching {len(target_topics)} user topic(s) "
         f"against {len(indexed_subtopics)} indexed subtopics."
     )
-    matches = topic_matcher.match_topics(target_topics, indexed_subtopics)
+    matches = _matcher().match_topics(target_topics, indexed_subtopics)
 
     matched_ids: List[int] = list({
         sid
@@ -147,7 +185,7 @@ def node_ingest(state: GraphState):
     
     if mode == "INDEXING":
         file_path = state["file_path"]
-        total_pages = state.get("total_pages") or ingestion_agent.get_page_count(file_path)
+        total_pages = state.get("total_pages") or _ingestion().get_page_count(file_path)
         current_page = state.get("current_page", 0)
 
         if current_page >= total_pages:
@@ -158,9 +196,9 @@ def node_ingest(state: GraphState):
             db = SessionLocal()
             try:
                 # Hash = sample_text + file_size + basename — must match IngestionAgent.create_document_record
-                sample_text = ingestion_agent.load_page_text(file_path, 0)[:10000]
+                sample_text = _ingestion().load_page_text(file_path, 0)[:10000]
                 file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-                content_hash = ingestion_agent.get_content_hash(sample_text + str(file_size) + os.path.basename(file_path))
+                content_hash = _ingestion().get_content_hash(sample_text + str(file_size) + os.path.basename(file_path))
                 
                 existing_doc = db.query(DBDocument).filter(DBDocument.content_hash == content_hash).first()
                 if existing_doc:
@@ -177,9 +215,24 @@ def node_ingest(state: GraphState):
                 db.close()
 
         logger.info(f"--- LIBRARY INDEXING: Page {current_page + 1}/{total_pages} ---")
-        page_text = ingestion_agent.load_page_text(file_path, current_page)
-        temp_chunks = ingestion_agent.text_splitter.split_text(page_text)
-        
+        page_text = _ingestion().load_page_text(file_path, current_page)
+        temp_chunks = _ingestion().text_splitter.split_text(page_text)
+
+        # Render and cache the page image for source-snippet display in Mentor Review
+        if file_path and file_path.lower().endswith(".pdf"):
+            cache_dir = "page_cache"
+            os.makedirs(cache_dir, exist_ok=True)
+            img_path = os.path.join(cache_dir, f"{doc_id}_p{current_page:04d}.png")
+            if not os.path.exists(img_path):
+                try:
+                    import fitz as _fitz
+                    with _fitz.open(file_path) as _doc:
+                        pix = _doc.load_page(current_page).get_pixmap(dpi=120)
+                        pix.save(img_path)
+                    logger.debug("Saved page image: %s", img_path)
+                except Exception as _e:
+                    logger.warning("Could not render page image for %s p%d: %s", doc_id, current_page, _e)
+
         return {
             "total_pages": total_pages,
             "chunks": temp_chunks,
@@ -255,7 +308,7 @@ def node_assign_topic(state: GraphState):
     hierarchy = state.get("hierarchy", [])
     pending = list(state.get("pending_qdrant_docs", []))
 
-    assignment = topic_assigner.assign_topic(chunk_text, hierarchy)
+    assignment = _assigner().assign_topic(chunk_text, hierarchy)
 
     db = SessionLocal()
     try:
@@ -283,7 +336,12 @@ def node_assign_topic(state: GraphState):
                 if item["topic"] == assignment.topic_name and assignment.subtopic_name not in item["subtopics"]:
                     item["subtopics"].append(assignment.subtopic_name)
 
-        new_chunk = ContentChunk(document_id=doc_id, text=chunk_text, subtopic_id=sub_obj.id)
+        new_chunk = ContentChunk(
+            document_id=doc_id,
+            text=chunk_text,
+            subtopic_id=sub_obj.id,
+            page_number=state.get("current_page"),
+        )
         db.add(new_chunk)
         db.commit()
         db.refresh(new_chunk)
@@ -320,9 +378,9 @@ def _flush_qdrant_batch(pending_docs: List[Dict[str, Any]]):
     try:
         QdrantVectorStore.from_documents(
             lc_docs,
-            ingestion_agent.embeddings,
+            _ingestion().embeddings,
             url=settings.QDRANT_URL,
-            collection_name=settings.QDRANT_COLLECTION_NAME,
+            collection_name=_ingestion().collection_name,
         )
     except Exception as e:
         logger.error(f"Qdrant batch flush failed ({len(pending_docs)} docs): {e}", exc_info=True)
@@ -337,10 +395,11 @@ def node_generate(state: GraphState):
     from langchain_core.documents import Document as LCDoc
     chunk_doc = LCDoc(page_content=chunk_data["text"], metadata={"db_chunk_id": chunk_data["id"]})
 
-    result = socratic_agent.generate_flashcard(
+    result = _socratic().generate_flashcard(
         state["doc_id"], chunk_doc,
         subtopic_id=chunk_data["subtopic_id"],
         subject_id=subject_id,
+        question_type=state.get("question_type", "active_recall"),
     )
 
     new_cards = []
@@ -364,7 +423,7 @@ def node_critic(state: GraphState):
     for card in new_cards:
         fc_id = card.get("flashcard_id")
         if fc_id:
-            critic_agent.evaluate_flashcard(
+            _critic().evaluate_flashcard(
                 flashcard_id=fc_id,
                 source_text=source_text,
                 question=card["question"],

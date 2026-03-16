@@ -11,8 +11,9 @@ import logging
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from typing import List
-from core.models import get_llm
+from core.models import get_llm, call_structured_chain
 from core.database import SessionLocal, Topic, Subtopic
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,20 +30,15 @@ class DocumentStructure(BaseModel):
     summary: str = Field(description="An overall summary of the document.")
     topics: List[TopicStructure] = Field(description="Hierarchical list of topics and their sub-topics.")
 
-class CuratorAgent:
-    def __init__(self):
-        self.llm = get_llm(purpose="primary")
-        self.structured_llm = self.llm.with_structured_output(DocumentStructure)
-        
-        self.prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are an expert Educational Content Curator. 
+_CURATOR_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are an expert Educational Content Curator.
             Your task is to analyze the provided educational material and organize it into a logical hierarchy of Topics and Sub-topics.
-            
+
             IMPORTANT: You are adding content to an existing Subject. Below is the current hierarchy of Topics and Sub-topics for this Subject.
-            
+
             Current Hierarchy:
             {existing_structure}
-            
+
             Instructions:
             1. Analyze the new content provided.
             2. Match the new content to the EXISTING Topics and Sub-topics where possible.
@@ -51,10 +47,16 @@ class CuratorAgent:
             5. Provide a concise summary for the new artifact, and update/provide summaries for topics and sub-topics.
             6. Return the FULL hierarchy for the new content (including matching existing ones).
             """),
-            ("human", "Analyze the following content and integrate it into the subject hierarchy:\n\n{content}")
-        ])
-        
-        self.chain = self.prompt | self.structured_llm
+    ("human", "Analyze the following content and integrate it into the subject hierarchy:\n\n{content}")
+])
+
+
+class CuratorAgent:
+    def __init__(self):
+        self._chain = self._build_chain()
+
+    def _build_chain(self):
+        return _CURATOR_PROMPT | get_llm(purpose="primary").with_structured_output(DocumentStructure)
 
     def curate_structure(self, subject_id: int, doc_id: str, full_text: str):
         """Analyzes text and merges it into the Subject's topic hierarchy."""
@@ -78,11 +80,15 @@ class CuratorAgent:
             # Do NOT access existing_topics after this line to avoid DetachedInstanceError if
             # the session state changes during the long LLM call below.
 
-            analysis_text = full_text[:15000] 
-            structure = self.chain.invoke({
-                "content": analysis_text,
-                "existing_structure": existing_structure_text
-            })
+            analysis_text = full_text[:15000]
+            # Rebuild chain per-call when hopping so provider selection is fresh
+            if settings.MODEL_HOP_ENABLED:
+                self._chain = self._build_chain()
+            structure = call_structured_chain(
+                self._chain,
+                DocumentStructure,
+                {"content": analysis_text, "existing_structure": existing_structure_text},
+            )
             
             # H13: deduplicate topics/subtopics within the LLM response before DB writes.
             # The model occasionally returns the same name twice; merging here prevents

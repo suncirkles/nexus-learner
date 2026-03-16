@@ -1,86 +1,204 @@
 """
 agents/critic.py
 -----------------
-Grounding evaluation agent. Scores AI-generated flashcards (1–5) by
-comparing the question and answer against the original source text.
-Auto-rejects severely hallucinated content (score < 3).
+Grounding evaluation agent. Scores AI-generated flashcards across four
+dimensions (accuracy, logic, grounding, clarity) on a 1–4 scale each.
+Auto-rejects cards where grounding_score < 2.
+Backward-compatible aggregate critic_score = round(mean of 4 sub-scores).
 """
 
+import json
 import logging
+from math import ceil
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from core.models import get_llm
+from core.models import get_llm, call_structured_chain
 from core.database import SessionLocal, Flashcard
 from core.config import settings
 
 logger = logging.getLogger(__name__)
 
-class GroundingEvaluation(BaseModel):
-    score: int = Field(description="Score from 1 to 5. 5 means completely accurate and grounded in source text. 1 means hallucinated or completely incorrect.", ge=1, le=5)
-    feedback: str = Field(description="Brief explanation of the score.")
+
+class RubricEvaluation(BaseModel):
+    accuracy_score: int = Field(
+        description="1-4: Is the answer factually correct per the source text? 4=fully correct, 1=factually wrong.",
+        ge=1, le=4,
+    )
+    logic_score: int = Field(
+        description="1-4: Is the reasoning/derivation sound? 4=flawless, 1=logically broken.",
+        ge=1, le=4,
+    )
+    grounding_score: int = Field(
+        description="1-4: Is the answer traceable to specific text in the source? 4=directly quoted/paraphrased, 1=not found in source.",
+        ge=1, le=4,
+    )
+    clarity_score: int = Field(
+        description=(
+            "1-4: Is the question/answer unambiguous and well-phrased? 4=crystal clear, 1=confusing. "
+            "CRITICAL: if the question refers to 'Table N', 'the table', 'the figure', 'the graph', "
+            "or any external dataset that is NOT actually embedded in the question text, assign 1 — "
+            "the student has no way to answer without the missing data."
+        ),
+        ge=1, le=4,
+    )
+    feedback: str = Field(description="Brief explanation justifying the scores.")
+    suggested_complexity: str = Field(
+        description=(
+            "Complexity of this card using Bloom's Taxonomy (CBSE HOTS framework): "
+            "simple = answer is a single fact directly quotable from one sentence in the source (Remember/Understand); "
+            "medium = requires applying a concept, multi-step assembly, or comparing ideas (Apply/Analyse); "
+            "complex = requires evaluation, justification, design, or transfer to an unfamiliar context — "
+            "a card whose answer can be directly quoted is NEVER complex (Evaluate/Create). "
+            "Default to medium when uncertain."
+        )
+    )
+
+
+_EVAL_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", """You are an objective AI critic evaluating an AI-generated flashcard against the original Source Text.
+
+Score each dimension on a scale of 1–4:
+- accuracy_score  (1-4): Is the answer factually correct per the source?
+- logic_score     (1-4): Is the reasoning sound?
+- grounding_score (1-4): Is the answer directly traceable to text in the source?
+- clarity_score   (1-4): Is the question/answer unambiguous and fully self-contained?
+
+PHANTOM DATA REFERENCE — INSTANT FAIL:
+If the question mentions "Table 1", "Table 2", "the table", "the data table", "the figure",
+"the graph", "the chart", or ANY external dataset/figure that is NOT actually embedded
+inside the question text as a Markdown table or explicit list of values, this is a critical flaw:
+  → Set clarity_score = 1 (student cannot answer — required data is missing from the question)
+  → Set grounding_score = 1 (question is not self-contained)
+A question that says "Using the temperature data table, calculate..." with NO table in the
+question text scores clarity = 1, grounding = 1, and will be auto-rejected.
+
+Complexity classification — Bloom's Taxonomy / CBSE HOTS framework:
+
+SIMPLE   (Bloom's: Remember / Understand)
+  • The answer is a single fact that can be directly quoted or paraphrased from ONE sentence in the source.
+  • A student who has read the passage once can answer it with no additional reasoning.
+  • Typical action verbs: Define, List, State, Identify, Summarize.
+  • Score signal: grounding_score = 4 AND logic_score ≤ 2.
+
+MEDIUM   (Bloom's: Apply / Analyse)
+  • Requires "horizontal" thinking: applying a formula/concept to a scenario, explaining a
+    multi-step process, or comparing/contrasting ideas — but all evidence is in the source.
+  • Typical action verbs: Calculate, Solve, Compare, Contrast, Explain, Illustrate.
+  • Score signal: grounding_score ≥ 3 AND logic_score = 3.
+
+COMPLEX  (Bloom's: Evaluate / Create — HOTS only)
+  • Requires "vertical" integration: connecting concepts across different sections, evaluating or
+    justifying a claim, designing a solution, OR applying a principle to a completely novel/unfamiliar
+    scenario not described in the source (Transfer of Learning).
+  • CRITICAL RULE: if the answer can be directly quoted from a single passage → NOT complex.
+  • Typical action verbs: Justify, Criticise, Formulate, Design, Integrate, Evaluate.
+  • Score signal: logic_score = 4 AND accuracy_score = 4 AND grounding_score ≤ 3
+    (synthesis is required — the answer cannot be found in a single passage).
+
+DEFAULT: when in doubt, assign MEDIUM. Reserve COMPLEX for genuine HOTS questions only.
+
+Return structured output with all 6 fields."""),
+    ("user", "Source Text:\n{source_text}\n\nGenerated Question: {question}\nGenerated Answer: {answer}"),
+])
+
+
+# Backward-compatible alias (existing tests import GroundingEvaluation)
+GroundingEvaluation = RubricEvaluation
+
+
+def _clamp(value: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, int(value)))
+
+
+def _aggregate(acc: int, log: int, grd: int, cla: int) -> int:
+    return round((acc + log + grd + cla) / 4)
+
 
 class CriticAgent:
     def __init__(self):
-        # The critic acts as an evaluator, utilizing the Primary model.
-        # In a larger system, we might use a specialized NLI evaluation model.
-        self.llm = get_llm(purpose="primary", temperature=0.0)
-        
-        self.prompt = ChatPromptTemplate.from_messages([
-             ("system", "You are an objective AI critic. Your task is to evaluate an AI-generated flashcard (Question & Answer) against the original Source Text. Give a score from 1-5 where:\n5: Answer is perfectly correct and fully supported by the Source Text.\n3: Answer is partially correct but misses nuance.\n1: Answer hallucinates facts NOT present in the Source Text.\nProvide brief feedback justifying the score."),
-             ("user", "Source Text:\n{source_text}\n\nGenerated Question: {question}\nGenerated Answer: {answer}")
-         ])
-         
-        self.chain = self.prompt | self.llm.with_structured_output(GroundingEvaluation)
-        
-    def evaluate_flashcard(self, flashcard_id: int, source_text: str, question: str, answer: str) -> dict:
-        """Evaluates a flashcard and updates its score in the database."""
-        # H18: wrap LLM call — structured output can fail if model returns unexpected format
+        self._chain = self._build_chain()
+
+    def _build_chain(self):
+        return _EVAL_PROMPT | get_llm(purpose="primary", temperature=0.0).with_structured_output(RubricEvaluation)
+
+    def evaluate_flashcard(
+        self,
+        flashcard_id: int,
+        source_text: str,
+        question: str,
+        answer: str,
+    ) -> dict:
+        """Evaluates a flashcard, writes 4-score rubric + aggregate to DB."""
         try:
-            eval_result = self.chain.invoke({
-                "source_text": source_text,
-                "question": question,
-                "answer": answer
-            })
-            # H18: clamp score to valid range defensively (Pydantic ge/le should catch it,
-            # but guard against None or non-int responses from edge-case LLM outputs)
-            score = max(1, min(5, int(eval_result.score)))
+            # Rebuild chain per-call when hopping so provider selection is fresh
+            if settings.MODEL_HOP_ENABLED:
+                self._chain = self._build_chain()
+            eval_result = call_structured_chain(
+                self._chain,
+                RubricEvaluation,
+                {"source_text": source_text, "question": question, "answer": answer},
+            )
+            acc = _clamp(eval_result.accuracy_score, 1, 4)
+            log = _clamp(eval_result.logic_score, 1, 4)
+            grd = _clamp(eval_result.grounding_score, 1, 4)
+            cla = _clamp(eval_result.clarity_score, 1, 4)
             feedback = eval_result.feedback or ""
+            suggested_complexity = eval_result.suggested_complexity or "medium"
+            # Normalise complexity to known values
+            if suggested_complexity not in ("simple", "medium", "complex"):
+                suggested_complexity = "medium"
         except Exception as e:
             logger.error("CriticAgent evaluation failed for flashcard %d: %s", flashcard_id, e)
             return {"error": f"Evaluation failed: {e}"}
 
+        aggregate_score = _aggregate(acc, log, grd, cla)
+        rubric_scores = {
+            "accuracy": acc,
+            "logic": log,
+            "grounding": grd,
+            "clarity": cla,
+        }
+
         db = SessionLocal()
         try:
             fc = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
-            if fc:
-                fc.critic_score = score
-                fc.critic_feedback = feedback
+            if not fc:
+                return {"error": "Flashcard not found"}
 
-                # H17: respect AUTO_ACCEPT_CONTENT.
-                # When auto-accept is ON the user has explicitly opted out of HITL review,
-                # so we should not silently force-reject cards — even low-scoring ones.
-                # Log a warning instead so the quality signal is still visible in logs.
-                if score < 3:
-                    if settings.AUTO_ACCEPT_CONTENT:
-                        logger.warning(
-                            "Flashcard %d scored %d/5 (low quality) but AUTO_ACCEPT_CONTENT=True "
-                            "— card remains approved. Feedback: %s",
-                            flashcard_id, score, feedback,
-                        )
-                    else:
-                        fc.status = "rejected"
-                        logger.info(
-                            "Flashcard %d auto-rejected (score %d/5). Feedback: %s",
-                            flashcard_id, score, feedback,
-                        )
+            fc.critic_score = aggregate_score
+            fc.critic_feedback = feedback
+            fc.critic_rubric_scores = json.dumps(rubric_scores)
+            # Write suggested_complexity so Mentor HITL can pre-populate the selectbox
+            fc.complexity_level = suggested_complexity
 
-                db.commit()
-                return {
-                    "flashcard_id": fc.id,
-                    "score": score,
-                    "feedback": feedback,
-                }
+            # Auto-reject rule 1: answer not traceable to source
+            # Auto-reject rule 2: phantom data reference (table/figure mentioned but not embedded)
+            #   — critic sets clarity=1 when question references unavailable external data
+            should_reject = grd < 2 or cla < 2
+            reject_reason = (
+                f"grounding_score={grd}/4" if grd < 2 else f"clarity_score={cla}/4 (phantom data reference)"
+            )
+            if should_reject:
+                if settings.AUTO_ACCEPT_CONTENT:
+                    logger.warning(
+                        "Flashcard %d %s but AUTO_ACCEPT_CONTENT=True "
+                        "— card remains approved. Feedback: %s",
+                        flashcard_id, reject_reason, feedback,
+                    )
+                else:
+                    fc.status = "rejected"
+                    logger.info(
+                        "Flashcard %d auto-rejected (%s). Feedback: %s",
+                        flashcard_id, reject_reason, feedback,
+                    )
+
+            db.commit()
+            return {
+                "flashcard_id": fc.id,
+                "score": aggregate_score,
+                "rubric_scores": rubric_scores,
+                "suggested_complexity": suggested_complexity,
+                "feedback": feedback,
+            }
         finally:
             db.close()
-
-        return {"error": "Flashcard not found"}

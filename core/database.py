@@ -98,6 +98,7 @@ class ContentChunk(Base):
     source_type = Column(String(20), nullable=False, default="pdf")   # "pdf" | "image" | "web" | "text"
     source_url = Column(String(2048), nullable=True)                   # URL if source_type == "web"
     subtopic_id = Column(Integer, ForeignKey("subtopics.id", ondelete="SET NULL"), index=True, nullable=True)
+    page_number = Column(Integer, nullable=True)                       # 0-based page index within the source PDF
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
@@ -147,8 +148,19 @@ class Flashcard(Base):
     question = Column(Text)
     answer = Column(Text)
     
+    # Question type & complexity
+    question_type    = Column(String(30), default="active_recall")
+    # enum: active_recall | fill_blank | short_answer | long_answer | numerical | scenario
+    complexity_level = Column(String(10), nullable=True)
+    # enum: simple | medium | complex — nullable until mentor confirms
+    rubric           = Column(Text, nullable=True)
+    # JSON: list of {criterion, description} grading criteria for this card
+    critic_rubric_scores = Column(Text, nullable=True)
+    # JSON: {"accuracy": 1-4, "logic": 1-4, "grounding": 1-4, "clarity": 1-4}
+
     # Evals / Grounding
     critic_score = Column(Integer, default=0)
+    # Backward-compatible aggregate: round(mean([accuracy, logic, grounding, clarity]))
     critic_feedback = Column(Text, nullable=True)
 
     # HITL State
@@ -166,12 +178,19 @@ class Flashcard(Base):
 Base.metadata.create_all(bind=engine)
 
 
+_migrations_done = False
+
+
 def _run_migrations():
     """Adds new columns/tables to an existing database without dropping data.
 
     Safe to call on both fresh and legacy databases. Uses PRAGMA table_info
     to detect missing columns before issuing ALTER TABLE.
     """
+    global _migrations_done
+    if _migrations_done:
+        return
+    _migrations_done = True
     with engine.connect() as conn:
         def column_exists(table: str, column: str) -> bool:
             rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
@@ -193,8 +212,15 @@ def _run_migrations():
             ("flashcards", "subject_id", "INTEGER REFERENCES subjects(id) ON DELETE CASCADE"),
             # Chunks are now assigned to a specific subtopic
             ("content_chunks", "subtopic_id", "INTEGER REFERENCES subtopics(id) ON DELETE SET NULL"),
+            # Page provenance for source image rendering
+            ("content_chunks", "page_number", "INTEGER"),
             # Topics are now owned by a document, not a subject
             ("topics", "document_id", "VARCHAR REFERENCES documents(id) ON DELETE CASCADE"),
+            # Phase 2.5: atomic content columns on flashcards
+            ("flashcards", "question_type",        "VARCHAR(30) NOT NULL DEFAULT 'active_recall'"),
+            ("flashcards", "complexity_level",     "VARCHAR(10)"),
+            ("flashcards", "rubric",               "TEXT"),
+            ("flashcards", "critic_rubric_scores", "TEXT"),
         ]
 
         for table, column, col_def in migrations:

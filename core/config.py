@@ -17,36 +17,46 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: str = ""            # Google AI Studio (Gemini)
     DEEPSEEK_API_KEY: str = ""          # DeepSeek (OpenAI-compatible API)
     LANGCHAIN_API_KEY: str = ""
-    
+
     # LangSmith Tracing
     LANGCHAIN_TRACING_V2: str = "true"
     LANGCHAIN_PROJECT: str = "nexus_learner_mvp"
-    
+
     # Models Config
     DEFAULT_LLM_PROVIDER: str = "openai"  # "openai" | "anthropic" | "groq" | "google" | "deepseek"
     PRIMARY_MODEL: str = "gpt-4o"
     ROUTING_MODEL: str = "gpt-4o-mini"
-    GEMINI_PRIMARY_MODEL: str = "gemini-2.0-flash"     # 1500 RPD free tier; swap to gemini-2.5-flash for quality (25 RPD only)
-    GEMINI_ROUTING_MODEL: str = "gemini-2.0-flash"     # same; 2.5-flash has 25 RPD — too low for routing volume
-    DEEPSEEK_PRIMARY_MODEL: str = "deepseek-chat"      # DeepSeek-V3; use deepseek-reasoner for complex multi-step tasks
-    DEEPSEEK_ROUTING_MODEL: str = "deepseek-chat"      # same model handles routing well at low cost
-    
+    GEMINI_PRIMARY_MODEL: str = "gemini-2.0-flash"     # 1500 RPD free tier
+    GEMINI_ROUTING_MODEL: str = "gemini-2.0-flash"
+    DEEPSEEK_PRIMARY_MODEL: str = "deepseek-chat"
+    DEEPSEEK_ROUTING_MODEL: str = "deepseek-chat"
+
     # Database
     DB_URL: str = "sqlite:///./nexus.db"
-    
+
     # Vector DB (Qdrant)
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_API_KEY: str = ""
     QDRANT_COLLECTION_NAME: str = "nexus_chunks"
-    
+
+    # Embeddings (used by IngestionAgent for Qdrant vector storage)
+    # "openai"      = OpenAIEmbeddings (requires valid key, 1536 dims)
+    # "huggingface" = local all-MiniLM-L6-v2 (no key needed, 384 dims, "_hf" collection suffix)
+    EMBEDDING_PROVIDER: str = "openai"
+
+    # Model hopping (free-tier multi-provider routing via LiteLLM)
+    MODEL_HOP_ENABLED: bool = False              # False = original OpenAI/Anthropic only
+    MODEL_HOP_PRIMARY_TIER: str = "balanced"     # tier for purpose="primary"
+    MODEL_HOP_ROUTING_TIER: str = "fast"         # tier for purpose="routing"
+
     # Semantic Cache (Qdrant-backed, local sentence-transformers embeddings)
     SEMANTIC_CACHE_ENABLED: bool = True
+    AGENT_CACHE_ENABLED: bool = False            # alias used by call_structured helpers
     SEMANTIC_CACHE_COLLECTION: str = "nexus_semantic_cache"
     SEMANTIC_CACHE_THRESHOLD: float = 0.92      # cosine similarity floor for a cache hit
     SEMANTIC_CACHE_TTL_SECONDS: int = 86400     # 0 = no TTL; default 24h
     SEMANTIC_CACHE_MAX_ENTRIES: int = 10000     # soft cap; oldest entries evicted beyond this
     # Schemas excluded from caching (non-deterministic agents — temperature > 0)
-    # Default: FlashcardOutput (SocraticAgent uses temp=0.3)
     SEMANTIC_CACHE_EXCLUDE_SCHEMAS: list[str] = Field(
         default=["FlashcardOutput"],
         description="Schema __name__ values never stored in or served from cache",
@@ -71,8 +81,8 @@ class Settings(BaseSettings):
     PAGE_CACHE_DIR: str = "page_cache"   # relative to project root; created on first use
 
     # Chunking Settings
-    CHUNK_SIZE: int = 3000            # math-aware separators split at ~paragraph level
-    CHUNK_OVERLAP: int = 400          # less critical now; generation uses full subtopic context
+    CHUNK_SIZE: int = 3000
+    CHUNK_OVERLAP: int = 400
     MAX_SUBTOPIC_CHARS: int = 12000   # max chars fed to Socratic per subtopic (≈3k tokens)
 
     # Web Scraping Settings

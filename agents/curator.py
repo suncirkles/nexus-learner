@@ -84,17 +84,37 @@ class CuratorAgent:
                 "existing_structure": existing_structure_text
             })
             
-            topics_data = []
+            # H13: deduplicate topics/subtopics within the LLM response before DB writes.
+            # The model occasionally returns the same name twice; merging here prevents
+            # duplicate DB records even if the ilike check misses a flush-timing edge case.
+            seen_topic_keys: dict = {}
+            deduped_topics = []
             for t in structure.topics:
-                # Check for existing topic by name (case-insensitive)
-                # Check for existing topic in THIS document or in the subject's hierarchy?
-                # For web research, we create a new document for the topic.
-                # So we want to see if this topic already exists globally or in the subject's view.
-                # In the new global model, topics belong to documents.
-                # If it already exists in the doc, reuse it.
+                key = t.name.strip().lower()
+                if key not in seen_topic_keys:
+                    seen_topic_keys[key] = t
+                    seen_sub_keys: set = set()
+                    unique_subs = []
+                    for s in t.subtopics:
+                        sub_key = s.name.strip().lower()
+                        if sub_key not in seen_sub_keys:
+                            seen_sub_keys.add(sub_key)
+                            unique_subs.append(s)
+                    t.subtopics = unique_subs
+                    deduped_topics.append(t)
+                else:
+                    existing = seen_topic_keys[key]
+                    existing_sub_keys = {s.name.strip().lower() for s in existing.subtopics}
+                    for s in t.subtopics:
+                        if s.name.strip().lower() not in existing_sub_keys:
+                            existing.subtopics.append(s)
+                            existing_sub_keys.add(s.name.strip().lower())
+                    logger.warning("Duplicate topic '%s' in LLM response — subtopics merged", t.name)
+
+            topics_data = []
+            for t in deduped_topics:
                 db_topic = db.query(Topic).filter(
-                    Topic.document_id == doc_id,
-                    Topic.name.ilike(t.name)
+                    Topic.document_id == doc_id, Topic.name.ilike(t.name)
                 ).first()
                 
                 if not db_topic:

@@ -64,10 +64,8 @@ RULES:
             result.subtopic_name = result.subtopic_name.strip()
             return result
         except Exception as e:
-            logger.error(f"Error assigning topic: {e}")
-            # Robust fallback
-            return TopicAssignment(
-                topic_name="General Overview",
-                subtopic_name="Introduction",
-                reasoning=f"Agent failed with error: {e}. Falling back to default."
-            )
+            # H19: do NOT fall back to "General Overview"/"Introduction" — that violates
+            # the No General Content policy and pollutes the topic hierarchy.
+            # Re-raise so node_assign_topic can log and skip this chunk cleanly.
+            logger.error("TopicAssigner failed for chunk (first 100 chars: %r): %s", chunk_text[:100], e)
+            raise

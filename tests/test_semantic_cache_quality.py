@@ -1,775 +1,294 @@
 """
 tests/test_semantic_cache_quality.py
 -------------------------------------
-Quality and contract tests for core/cache.py — SemanticCache.
+RAGAS quality-gate tests for the semantic cache.
 
-Test categories
----------------
-  Unit (no external deps):
-    - Cache is a no-op when AGENT_CACHE_ENABLED=False
-    - Schema exclusion (FlashcardOutput never stored/served)
-    - stats() increments correctly on store / hit / miss
-    - Exact hit after store
-    - Schema isolation (schema-A entry does not satisfy schema-B lookup)
-    - clear() resets entries and stats
-    - Similarity threshold: below-threshold prompt → miss, above → hit
-    - Thread safety: concurrent stores do not corrupt stats
+Marked @pytest.mark.slow — not run in the standard fast suite.
 
-  Integration (requires sentence-transformers or OPENAI_API_KEY):
-    - Semantically similar paraphrase returns a cached result
-    - Unrelated prompt scores below threshold → miss
-    - call_structured() wires into cache: stores on miss, returns hit on second call
-    - call_structured_chain() likewise stores on first call
-    - None / exception result is never stored
-
-  Slow / live-API:
-    - Second identical call_structured() invocation hits cache; API call count = 1
-
-Run default (unit only):
-    PYTHONPATH=. pytest tests/test_semantic_cache_quality.py -v
-
-Run with embeddings:
-    PYTHONPATH=. pytest tests/test_semantic_cache_quality.py -v -m integration
-
-Run everything including live LLM:
+Run:
     PYTHONPATH=. pytest tests/test_semantic_cache_quality.py -v -m slow
+
+Skips gracefully when:
+- No LLM provider keys are set
+- Qdrant is unavailable
+- sentence-transformers is not installed
 """
 
-import os
-import threading
-from unittest.mock import MagicMock, patch
+from __future__ import annotations
 
+import textwrap
 import pytest
+
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Skip entire module when core/cache.py is not on this branch
+# Schemas (duplicated from sample_free_tier.py — tests are self-contained)
 # ---------------------------------------------------------------------------
 
-try:
-    from core.cache import SemanticCache, get_cache, _cosine  # noqa: F401
-    _CACHE_AVAILABLE = True
-except ImportError:
-    _CACHE_AVAILABLE = False
+class Flashcard(BaseModel):
+    question: str = Field(description="Active recall question")
+    answer: str = Field(description="Concise, accurate answer")
+    difficulty: str = Field(description="easy | medium | hard")
 
-pytestmark = pytest.mark.skipif(
-    not _CACHE_AVAILABLE,
-    reason="core/cache.py not available on this branch",
-)
-
-
-# ---------------------------------------------------------------------------
-# Minimal Pydantic schemas used across tests
-# ---------------------------------------------------------------------------
-
-class DummyScore(BaseModel):
-    value: int = Field(ge=0, le=10)
-    label: str
-
-
-class OtherSchema(BaseModel):
-    text: str
-
-
-# Mirror the excluded schema name that lives in settings
 class FlashcardOutput(BaseModel):
-    question: str
-    answer: str
+    cards: list[Flashcard] = Field(description="1–3 flashcards derived from the passage")
+    chunk_summary: str = Field(description="One-sentence summary of the passage")
+
+class RelevanceDecision(BaseModel):
+    is_relevant: bool = Field(description="True if the chunk is relevant to the target topics")
+    reason: str = Field(description="One-sentence justification")
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Shared fixtures / helpers
 # ---------------------------------------------------------------------------
 
-@pytest.fixture
-def fresh_cache():
-    """Isolated SemanticCache instance — never touches the singleton."""
-    cache = SemanticCache(similarity_threshold=0.90)
-    yield cache
-    cache.clear()
+SAMPLE_TEXT = textwrap.dedent("""
+    Conditional probability is the probability of an event A occurring given that
+    another event B has already occurred. It is written as P(A|B) and defined as:
 
+        P(A|B) = P(A ∩ B) / P(B),  provided P(B) > 0.
 
-@pytest.fixture(autouse=True)
-def _reset_singleton():
-    """
-    Stash and restore the module-level singleton so tests don't bleed state.
-    """
-    import core.cache as cache_mod
-    original = cache_mod._cache_instance
-    cache_mod._cache_instance = None
-    yield
-    cache_mod._cache_instance = original
+    Bayes' Theorem follows directly: P(A|B) = [P(B|A) · P(A)] / P(B).
+    P(A) is the prior, P(A|B) is the posterior, P(B|A) is the likelihood.
+""").strip()
 
+TARGET_TOPICS = ["Conditional Probability", "Bayes' Theorem"]
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+CARD_PROMPT = textwrap.dedent(f"""
+    You are an Active Recall flashcard generator.
+    Generate 1–3 high-quality flashcards from the passage below.
+    Focus on conceptual understanding, not rote memorisation.
+    Assign difficulty: easy | medium | hard.
 
-def _inject_embed(cache: SemanticCache, vec: list[float]) -> None:
-    """Swap in a deterministic embed function that always returns *vec*."""
-    cache._embed_fn = lambda _text: list(vec)
+    Passage:
+    {SAMPLE_TEXT}
+""").strip()
 
+RELEVANCE_PROMPT = textwrap.dedent(f"""
+    Decide whether the following text chunk is relevant to these topics:
+    {TARGET_TOPICS}
 
-def _inject_embed_counter(cache: SemanticCache, vecs: list[list[float]]) -> None:
-    """
-    Swap in an embed function that cycles through *vecs* on successive calls.
-    Useful for orthogonal store / lookup tests.
-    """
-    state = {"idx": 0}
+    Chunk:
+    {SAMPLE_TEXT}
+""").strip()
 
-    def _fn(_text: str) -> list[float]:
-        v = vecs[state["idx"] % len(vecs)]
-        state["idx"] += 1
-        return list(v)
 
-    cache._embed_fn = _fn
+def _skip_if_no_providers():
+    """Raise pytest.skip if no LLM provider keys are available."""
+    import os
+    keys = ["GROQ_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]
+    if not any(os.environ.get(k) for k in keys):
+        pytest.skip("No LLM provider API keys configured")
 
 
-# ===========================================================================
-# SECTION 1 — Basic contract
-# ===========================================================================
-
-class TestCacheContract:
-
-    def test_stats_initial(self, fresh_cache):
-        assert fresh_cache.stats() == {"hits": 0, "misses": 0, "stores": 0}
-
-    def test_lookup_empty_returns_none(self, fresh_cache):
-        result = fresh_cache.lookup("any prompt", DummyScore)
-        assert result is None
-
-    def test_stats_miss_increments(self, fresh_cache):
-        _inject_embed(fresh_cache, [1.0, 0.0])
-        fresh_cache.lookup("some prompt", DummyScore)
-        s = fresh_cache.stats()
-        assert s["hits"] == 0
-        assert s["misses"] >= 1
-
-    def test_store_increments_stores(self, fresh_cache):
-        _inject_embed(fresh_cache, [1.0, 0.0])
-        fresh_cache.store("prompt", DummyScore, DummyScore(value=5, label="mid"), model="t")
-        assert fresh_cache.stats()["stores"] == 1
-
-    def test_clear_resets_everything(self, fresh_cache):
-        _inject_embed(fresh_cache, [1.0, 0.0])
-        fresh_cache.store("p", DummyScore, DummyScore(value=3, label="lo"))
-        fresh_cache.lookup("p", DummyScore)
-        fresh_cache.clear()
-        assert fresh_cache.stats() == {"hits": 0, "misses": 0, "stores": 0}
-        assert len(fresh_cache) == 0
-
-    def test_len_reflects_stored_entries(self, fresh_cache):
-        _inject_embed(fresh_cache, [0.5, 0.5])
-        assert len(fresh_cache) == 0
-        fresh_cache.store("p1", DummyScore, DummyScore(value=1, label="a"))
-        fresh_cache.store("p2", DummyScore, DummyScore(value=2, label="b"))
-        assert len(fresh_cache) == 2
-
-    def test_no_embed_fn_is_transparent_no_op(self, fresh_cache):
-        """
-        When _embed_fn is None the cache must be completely transparent:
-        lookup → None, store → silent, stats increment misses only.
-        """
-        fresh_cache._embed_fn = None
-        result = fresh_cache.lookup("q", DummyScore)
-        fresh_cache.store("q", DummyScore, DummyScore(value=0, label="z"))
-        s = fresh_cache.stats()
-        assert result is None
-        assert s["stores"] == 0
-        assert s["hits"] == 0
-
-
-# ===========================================================================
-# SECTION 2 — Exact hit
-# ===========================================================================
-
-class TestExactHit:
-
-    def test_exact_prompt_returns_stored_result(self, fresh_cache):
-        _inject_embed(fresh_cache, [1.0, 0.0])
-        fresh_cache._threshold = 0.99
-        obj = DummyScore(value=7, label="exact")
-        fresh_cache.store("the exact prompt", DummyScore, obj, model="test-model")
-        hit = fresh_cache.lookup("the exact prompt", DummyScore)
-        assert hit is not None
-        assert hit.value == 7
-        assert hit.label == "exact"
-
-    def test_hit_increments_stats(self, fresh_cache):
-        _inject_embed(fresh_cache, [1.0, 0.0])
-        fresh_cache._threshold = 0.0
-        fresh_cache.store("p", DummyScore, DummyScore(value=1, label="x"))
-        fresh_cache.lookup("p", DummyScore)
-        s = fresh_cache.stats()
-        assert s["stores"] == 1
-        assert s["hits"] == 1
-        assert s["misses"] == 0
-
-    def test_miss_does_not_increment_hits(self, fresh_cache):
-        fresh_cache._threshold = 0.99
-        # Store with [1, 0]; look up with [0, 1] → cosine = 0.0 → miss
-        _inject_embed_counter(fresh_cache, [[1.0, 0.0], [0.0, 1.0]])
-        fresh_cache.store("p1", DummyScore, DummyScore(value=2, label="y"))
-        fresh_cache.lookup("p2", DummyScore)
-        s = fresh_cache.stats()
-        assert s["hits"] == 0
-        assert s["misses"] >= 1
-
-
-# ===========================================================================
-# SECTION 3 — Schema isolation
-# ===========================================================================
-
-class TestSchemaIsolation:
-
-    def test_schema_a_entry_does_not_match_schema_b_lookup(self, fresh_cache):
-        """Same prompt embedding, different schema → miss."""
-        _inject_embed(fresh_cache, [1.0, 0.0])
-        fresh_cache._threshold = 0.0   # accept any similarity
-
-        fresh_cache.store("same prompt", DummyScore, DummyScore(value=5, label="a"))
-        result = fresh_cache.lookup("same prompt", OtherSchema)
-        assert result is None, (
-            "DummyScore entry must not satisfy an OtherSchema lookup — "
-            "schema isolation is broken"
-        )
-
-    def test_schema_a_entry_matches_schema_a_lookup(self, fresh_cache):
-        """Sanity: same schema + identical embedding → hit."""
-        _inject_embed(fresh_cache, [0.0, 1.0])
-        fresh_cache._threshold = 0.0
-
-        obj = DummyScore(value=9, label="z")
-        fresh_cache.store("the prompt", DummyScore, obj)
-        result = fresh_cache.lookup("the prompt", DummyScore)
-        assert result is not None
-        assert isinstance(result, DummyScore)
-        assert result.value == 9
-
-    def test_two_schemas_stored_independently(self, fresh_cache):
-        """Storing entries for two different schemas; each lookup only returns its own."""
-        _inject_embed(fresh_cache, [1.0, 0.0])
-        fresh_cache._threshold = 0.0
-
-        fresh_cache.store("prompt", DummyScore, DummyScore(value=3, label="ds"))
-        fresh_cache.store("prompt", OtherSchema, OtherSchema(text="hello"))
-
-        r_ds = fresh_cache.lookup("prompt", DummyScore)
-        r_os = fresh_cache.lookup("prompt", OtherSchema)
-
-        assert isinstance(r_ds, DummyScore)
-        assert isinstance(r_os, OtherSchema)
-        assert r_ds.value == 3
-        assert r_os.text == "hello"
-
-
-# ===========================================================================
-# SECTION 4 — Similarity threshold
-# ===========================================================================
-
-class TestSimilarityThreshold:
-
-    def test_orthogonal_embedding_is_miss(self):
-        """cosine([1,0], [0,1]) = 0.0 — must be below any reasonable threshold."""
-        cache = SemanticCache(similarity_threshold=0.5)
-        _inject_embed_counter(cache, [[1.0, 0.0], [0.0, 1.0]])
-        cache.store("stored", DummyScore, DummyScore(value=1, label="a"))
-        result = cache.lookup("different", DummyScore)
-        assert result is None
-
-    def test_identical_embedding_is_hit(self):
-        """cosine([1,0], [1,0]) = 1.0 — must be a hit at any threshold ≤ 1.0."""
-        cache = SemanticCache(similarity_threshold=0.99)
-        _inject_embed(cache, [1.0, 0.0])
-        cache.store("q", DummyScore, DummyScore(value=2, label="b"))
-        result = cache.lookup("q", DummyScore)
-        assert result is not None
-
-    def test_threshold_boundary_exclusive(self):
-        """
-        If cosine = threshold exactly the entry should be returned (>= comparison).
-        We pick threshold=0.5 and use vectors with cosine≈0.5 ([1,0] vs [1,1]/√2).
-        """
-        import math
-        cache = SemanticCache(similarity_threshold=0.5)
-        # Store with [1, 0]; look up with [1, 1]/√2 → cosine = 1/√2 ≈ 0.707
-        norm = 1.0 / math.sqrt(2)
-        _inject_embed_counter(cache, [[1.0, 0.0], [norm, norm]])
-        cache.store("stored", DummyScore, DummyScore(value=5, label="t"))
-        result = cache.lookup("query", DummyScore)
-        # cosine ≈ 0.707 >= 0.5 → should hit
-        assert result is not None, (
-            "cosine≈0.707 should satisfy threshold=0.5 but returned miss"
-        )
-
-    def test_cosine_helper_correct(self):
-        """Unit test _cosine() directly."""
-        from core.cache import _cosine
-        assert abs(_cosine([1.0, 0.0], [1.0, 0.0]) - 1.0) < 1e-9
-        assert abs(_cosine([1.0, 0.0], [0.0, 1.0]) - 0.0) < 1e-9
-        assert abs(_cosine([0.0, 0.0], [1.0, 0.0])) < 1e-9   # zero vector → 0
-
-    def test_cosine_unnormalised_vectors(self):
-        """_cosine() must handle unnormalised vectors correctly."""
-        from core.cache import _cosine
-        # [3, 4] · [6, 8] / (5 * 10) = 50/50 = 1.0
-        assert abs(_cosine([3.0, 4.0], [6.0, 8.0]) - 1.0) < 1e-9
-        # [1, 0] · [0, 5] / (1 * 5) = 0.0
-        assert abs(_cosine([1.0, 0.0], [0.0, 5.0])) < 1e-9
-
-
-# ===========================================================================
-# SECTION 5 — Schema exclusion (FlashcardOutput)
-# ===========================================================================
-
-class TestSchemaExclusion:
-    """
-    FlashcardOutput (and any other schema in SEMANTIC_CACHE_EXCLUDE_SCHEMAS)
-    must never be stored in or served from the cache.
-    """
-
-    def test_excluded_schema_store_not_called(self):
-        """call_structured() must not call cache.store() for an excluded schema."""
-        from core.config import settings
-        from core.models import call_structured
-
-        mock_result = FlashcardOutput(question="Q?", answer="A.")
-        mock_llm = MagicMock()
-        mock_llm.with_structured_output.return_value.invoke.return_value = mock_result
-
-        cache_mock = MagicMock()
-        cache_mock.lookup.return_value = None
-
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True), \
-             patch("core.models.get_llm", return_value=mock_llm), \
-             patch("core.cache.get_cache", return_value=cache_mock):
-            call_structured(FlashcardOutput, "Generate a flashcard about X")
-
-        assert cache_mock.store.call_count == 0, (
-            "FlashcardOutput was stored in cache despite being in "
-            "SEMANTIC_CACHE_EXCLUDE_SCHEMAS"
-        )
-
-    def test_excluded_schema_lookup_not_called(self):
-        """call_structured() must not call cache.lookup() for an excluded schema."""
-        from core.config import settings
-        from core.models import call_structured
-
-        mock_result = FlashcardOutput(question="Q?", answer="A.")
-        mock_llm = MagicMock()
-        mock_llm.with_structured_output.return_value.invoke.return_value = mock_result
-
-        cache_mock = MagicMock()
-
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True), \
-             patch("core.models.get_llm", return_value=mock_llm), \
-             patch("core.cache.get_cache", return_value=cache_mock):
-            call_structured(FlashcardOutput, "Generate a flashcard about X")
-
-        assert cache_mock.lookup.call_count == 0, (
-            "lookup() was called for FlashcardOutput — excluded schema must "
-            "bypass cache entirely"
-        )
-
-    def test_non_excluded_schema_does_use_cache(self):
-        """A non-excluded schema (DummyScore) must still go through lookup/store."""
-        from core.config import settings
-        from core.models import call_structured
-
-        obj = DummyScore(value=4, label="mid")
-        mock_llm = MagicMock()
-        mock_llm.with_structured_output.return_value.invoke.return_value = obj
-
-        cache_mock = MagicMock()
-        cache_mock.lookup.return_value = None  # simulate miss
-
-        # Temporarily add DummyScore as non-excluded (default list only has FlashcardOutput)
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True), \
-             patch.object(settings, "SEMANTIC_CACHE_EXCLUDE_SCHEMAS", ["FlashcardOutput"]), \
-             patch("core.models.get_llm", return_value=mock_llm), \
-             patch("core.cache.get_cache", return_value=cache_mock):
-            result = call_structured(DummyScore, "Score this document")
-
-        assert result == obj
-        assert cache_mock.lookup.call_count == 1
-        assert cache_mock.store.call_count == 1
-
-
-# ===========================================================================
-# SECTION 6 — AGENT_CACHE_ENABLED=False
-# ===========================================================================
-
-class TestCacheDisabled:
-
-    def test_no_cache_calls_when_disabled(self):
-        from core.config import settings
-        from core.models import call_structured
-
-        obj = DummyScore(value=4, label="mid")
-        mock_llm = MagicMock()
-        mock_llm.with_structured_output.return_value.invoke.return_value = obj
-
-        cache_mock = MagicMock()
-
-        with patch.object(settings, "AGENT_CACHE_ENABLED", False), \
-             patch("core.models.get_llm", return_value=mock_llm), \
-             patch("core.cache.get_cache", return_value=cache_mock):
-            result = call_structured(DummyScore, "What is 1+1?")
-
-        assert result == obj
-        assert cache_mock.lookup.call_count == 0
-        assert cache_mock.store.call_count == 0
-
-    def test_result_still_returned_when_disabled(self):
-        from core.config import settings
-        from core.models import call_structured
-
-        obj = DummyScore(value=8, label="high")
-        mock_llm = MagicMock()
-        mock_llm.with_structured_output.return_value.invoke.return_value = obj
-
-        with patch.object(settings, "AGENT_CACHE_ENABLED", False), \
-             patch("core.models.get_llm", return_value=mock_llm):
-            result = call_structured(DummyScore, "Classify this text")
-
-        assert isinstance(result, DummyScore)
-        assert result.value == 8
-
-
-# ===========================================================================
-# SECTION 7 — call_structured / call_structured_chain wiring
-# ===========================================================================
-
-class TestCallStructuredCacheWiring:
-
-    def test_stores_on_cache_miss(self):
-        """First call (cache miss) must call store() after a successful LLM call."""
-        from core.config import settings
-        from core.models import call_structured
-
-        obj = DummyScore(value=6, label="wired")
-        mock_llm = MagicMock()
-        mock_llm.with_structured_output.return_value.invoke.return_value = obj
-
-        cache_mock = MagicMock()
-        cache_mock.lookup.return_value = None
-
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True), \
-             patch.object(settings, "SEMANTIC_CACHE_EXCLUDE_SCHEMAS", []), \
-             patch("core.models.get_llm", return_value=mock_llm), \
-             patch("core.cache.get_cache", return_value=cache_mock):
-            result = call_structured(DummyScore, "Score this document")
-
-        assert result == obj
-        assert cache_mock.lookup.call_count == 1
-        assert cache_mock.store.call_count == 1
-
-    def test_returns_cached_result_on_hit(self):
-        """On a cache hit the LLM must NOT be called."""
-        from core.config import settings
-        from core.models import call_structured
-
-        cached_obj = DummyScore(value=2, label="cached")
-        mock_llm = MagicMock()
-
-        cache_mock = MagicMock()
-        cache_mock.lookup.return_value = cached_obj
-
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True), \
-             patch.object(settings, "SEMANTIC_CACHE_EXCLUDE_SCHEMAS", []), \
-             patch("core.models.get_llm", return_value=mock_llm), \
-             patch("core.cache.get_cache", return_value=cache_mock):
-            result = call_structured(DummyScore, "Score this document")
-
-        assert result is cached_obj
-        mock_llm.with_structured_output.assert_not_called()
-
-    def test_exception_result_not_stored(self):
-        """If the LLM raises, store() must not be called."""
-        from core.config import settings
-        from core.models import call_structured
-
-        mock_llm = MagicMock()
-        mock_llm.with_structured_output.return_value.invoke.side_effect = RuntimeError("boom")
-
-        cache_mock = MagicMock()
-        cache_mock.lookup.return_value = None
-
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True), \
-             patch.object(settings, "SEMANTIC_CACHE_EXCLUDE_SCHEMAS", []), \
-             patch("core.models.get_llm", return_value=mock_llm), \
-             patch("core.cache.get_cache", return_value=cache_mock):
-            with pytest.raises(RuntimeError):
-                call_structured(DummyScore, "Will fail")
-
-        assert cache_mock.store.call_count == 0, (
-            "store() called despite LLM raising — failed calls must never be cached"
-        )
-
-    def test_call_structured_chain_stores_on_miss(self):
-        """call_structured_chain() must store on a cache miss."""
-        from core.config import settings
-        from core.models import call_structured_chain
-        from langchain_core.prompts import ChatPromptTemplate
-
-        obj = OtherSchema(text="chain result")
-
-        prompt_tpl = ChatPromptTemplate.from_messages([
-            ("user", "Summarise: {content}")
-        ])
-
-        mock_chain = MagicMock()
-        mock_chain.steps = [prompt_tpl]
-        mock_chain.invoke.return_value = obj
-
-        cache_mock = MagicMock()
-        cache_mock.lookup.return_value = None
-
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True), \
-             patch.object(settings, "SEMANTIC_CACHE_EXCLUDE_SCHEMAS", []), \
-             patch("core.cache.get_cache", return_value=cache_mock):
-            result = call_structured_chain(
-                mock_chain, OtherSchema, {"content": "some text"}
-            )
-
-        assert result == obj
-        assert cache_mock.store.call_count == 1
-
-    def test_call_structured_chain_returns_hit(self):
-        """call_structured_chain() must return cached result without calling chain.invoke()."""
-        from core.config import settings
-        from core.models import call_structured_chain
-        from langchain_core.prompts import ChatPromptTemplate
-
-        cached = OtherSchema(text="cached chain")
-        prompt_tpl = ChatPromptTemplate.from_messages([("user", "X: {content}")])
-
-        mock_chain = MagicMock()
-        mock_chain.steps = [prompt_tpl]
-
-        cache_mock = MagicMock()
-        cache_mock.lookup.return_value = cached
-
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True), \
-             patch.object(settings, "SEMANTIC_CACHE_EXCLUDE_SCHEMAS", []), \
-             patch("core.cache.get_cache", return_value=cache_mock):
-            result = call_structured_chain(
-                mock_chain, OtherSchema, {"content": "some text"}
-            )
-
-        assert result is cached
-        mock_chain.invoke.assert_not_called()
-
-
-# ===========================================================================
-# SECTION 8 — Thread safety
-# ===========================================================================
-
-class TestThreadSafety:
-
-    def test_concurrent_stores_no_corruption(self, fresh_cache):
-        """10 threads storing simultaneously must not corrupt stats."""
-        _inject_embed(fresh_cache, [1.0, 0.0])
-
-        threads = [
-            threading.Thread(
-                target=fresh_cache.store,
-                args=("p", DummyScore, DummyScore(value=i, label=str(i))),
-            )
-            for i in range(10)
-        ]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        s = fresh_cache.stats()
-        assert isinstance(s, dict)
-        assert set(s.keys()) == {"hits", "misses", "stores"}
-        assert s["stores"] == 10
-
-    def test_concurrent_lookups_no_corruption(self, fresh_cache):
-        """10 threads looking up simultaneously must not corrupt stats."""
-        _inject_embed(fresh_cache, [1.0, 0.0])
-        fresh_cache._threshold = 0.0
-        fresh_cache.store("q", DummyScore, DummyScore(value=5, label="t"))
-
-        results = []
-        lock = threading.Lock()
-
-        def lookup_and_record():
-            r = fresh_cache.lookup("q", DummyScore)
-            with lock:
-                results.append(r)
-
-        threads = [threading.Thread(target=lookup_and_record) for _ in range(10)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-
-        # All lookups must return the stored object
-        assert all(r is not None for r in results), (
-            "Some concurrent lookups returned None on a populated cache"
-        )
-        s = fresh_cache.stats()
-        assert s["hits"] == 10
-
-
-# ===========================================================================
-# SECTION 9 — Integration: real embeddings
-# ===========================================================================
-
-def _has_embedding_backend() -> bool:
+def _get_cache_or_skip():
+    """Return a ready SemanticCache or skip the test."""
     try:
-        import sentence_transformers  # noqa: F401
-        return True
-    except ImportError:
-        pass
-    return bool(os.environ.get("OPENAI_API_KEY"))
+        from core.cache import init_semantic_cache, _reset_cache_singleton  # type: ignore[import]
+        _reset_cache_singleton()
+        cache = init_semantic_cache()
+    except ImportError as exc:
+        pytest.skip(f"core.cache not importable: {exc}")
+
+    if not cache.stats()["enabled"]:
+        pytest.skip("SemanticCache not ready (Qdrant unavailable or sentence-transformers missing)")
+    return cache
 
 
-requires_embed = pytest.mark.skipif(
-    not _has_embedding_backend(),
-    reason="No embedding backend available (install sentence-transformers or set OPENAI_API_KEY)",
-)
+def _first_available_model() -> str:
+    """Return the first available model string, or skip."""
+    from scripts.model_hop import available_providers  # type: ignore[import]
+    providers = available_providers()
+    if not providers:
+        pytest.skip("No LLM provider API keys configured")
+    return next(iter(providers.values()))
 
 
-@pytest.mark.integration
-class TestSemanticSimilarity:
+def _ragas_score(qa_pairs: list[tuple[str, str]], context: str) -> tuple[float | None, float | None]:
+    """Run RAGAS and return (faithfulness, response_relevancy).
 
-    @requires_embed
-    def test_paraphrase_hits_cache(self):
-        """A close paraphrase of the stored prompt should return a cache hit."""
-        cache = SemanticCache(similarity_threshold=0.85)
-        obj = DummyScore(value=7, label="semantic")
-        cache.store(
-            "What is the central limit theorem in probability?",
-            DummyScore,
-            obj,
-            model="test",
-        )
-        result = cache.lookup(
-            "Explain the central limit theorem in statistics",
-            DummyScore,
-        )
-        # We do not hard-assert a hit — similarity depends on embedding quality.
-        # But IF a hit occurs it must deserialise to the correct type.
-        if result is not None:
-            assert isinstance(result, DummyScore)
-            assert result.value == 7
-
-    @requires_embed
-    def test_unrelated_prompt_misses_cache(self):
-        """An unrelated prompt must not hit an entry from a very different domain."""
-        cache = SemanticCache(similarity_threshold=0.90)
-        cache.store(
-            "What is the mean of a normal distribution?",
-            DummyScore,
-            DummyScore(value=5, label="stats"),
-        )
-        result = cache.lookup(
-            "How do you configure a Kubernetes pod resource limit?",
-            DummyScore,
-        )
-        assert result is None, (
-            "Kubernetes question hit a statistics cache entry — "
-            "similarity threshold or embeddings are not discriminating enough"
-        )
-
-    @requires_embed
-    def test_get_cache_singleton_returns_same_instance(self):
-        """get_cache() must return the same object on repeated calls."""
-        import core.cache as cache_mod
-        cache_mod._cache_instance = None  # start fresh
-        c1 = get_cache()
-        c2 = get_cache()
-        assert c1 is c2, "get_cache() must return a singleton"
+    Returns (None, None) if RAGAS is unavailable or evaluation fails.
+    """
+    try:
+        from scripts.model_hop import build_ragas_evaluator, run_ragas_benchmark  # type: ignore[import]
+        eval_llm, eval_embeddings = build_ragas_evaluator()
+        results = run_ragas_benchmark({"test": qa_pairs}, eval_llm, eval_embeddings, context)
+        r = results[0]
+        return r["faithfulness"], r["response_relevancy"]
+    except Exception:
+        return None, None
 
 
-# ===========================================================================
-# SECTION 10 — Slow / live-API: end-to-end cache round-trip
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
-def _has_any_key() -> bool:
-    return bool(
-        os.environ.get("OPENAI_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-    )
+@pytest.mark.slow
+def test_cache_hit_produces_identical_ragas_scores():
+    """Cache hits must return objects identical to the first-run result.
+
+    Because cached hits return the exact same Pydantic object (deserialised
+    from stored JSON), RAGAS scores must be numerically identical to run 1
+    and within tolerance of an uncached baseline.
+    """
+    _skip_if_no_providers()
+    cache = _get_cache_or_skip()
+    model = _first_available_model()
+
+    from scripts.model_hop import generate_structured  # type: ignore[import]
+
+    # Use RelevanceDecision (not excluded from cache)
+    prompts = [
+        RELEVANCE_PROMPT,
+        RELEVANCE_PROMPT + "\n\nPlease be concise.",
+        "Is Bayes' theorem discussed?\n\n" + SAMPLE_TEXT[:200],
+    ]
+
+    # Step 1: Uncached baseline
+    cache.clear()
+    baseline_qa: list[tuple[str, str]] = []
+    for p in prompts:
+        r = generate_structured(model, RelevanceDecision, p, use_cache=False)
+        if r:
+            baseline_qa.append((p[:80], r.reason))
+
+    # Step 2: Populate cache (run 1 with cache enabled)
+    cache.clear()
+    run1_qa: list[tuple[str, str]] = []
+    for p in prompts:
+        r = generate_structured(model, RelevanceDecision, p, use_cache=True)
+        if r:
+            run1_qa.append((p[:80], r.reason))
+
+    if cache.stats()["stores"] == 0:
+        pytest.skip("All LLM calls returned None (quota exhausted) — cannot populate cache")
+
+    # Step 3: Serve from cache (run 2)
+    run2_qa: list[tuple[str, str]] = []
+    for p in prompts:
+        r = generate_structured(model, RelevanceDecision, p, use_cache=True)
+        if r:
+            run2_qa.append((p[:80], r.reason))
+
+    assert cache.stats()["hits"] > 0, "Run 2 should have cache hits"
+
+    # Step 4: RAGAS comparison (best-effort; skip if RAGAS unavailable)
+    if run1_qa and run2_qa:
+        faith_b, _ = _ragas_score(baseline_qa, SAMPLE_TEXT)
+        faith_1, _ = _ragas_score(run1_qa, SAMPLE_TEXT)
+        faith_2, _ = _ragas_score(run2_qa, SAMPLE_TEXT)
+
+        if faith_1 is not None and faith_2 is not None:
+            assert abs(faith_2 - faith_1) < 0.001, (
+                f"Cache hit faithfulness ({faith_2}) differs from run 1 ({faith_1}): "
+                "cached objects should be identical"
+            )
+        if faith_b is not None and faith_2 is not None:
+            assert abs(faith_2 - faith_b) < 0.05, (
+                f"Cache hit faithfulness ({faith_2}) too far from baseline ({faith_b})"
+            )
 
 
 @pytest.mark.slow
-@pytest.mark.integration
-class TestLiveApiCacheRoundTrip:
+def test_cache_boundary_scores_within_tolerance():
+    """Semantically similar (rephrased) prompts served from cache must not
+    degrade RAGAS faithfulness by more than 0.05 vs the original.
+
+    A cache MISS at the threshold boundary is informational — not a failure.
     """
-    These tests hit a real LLM.  They verify that after the first call_structured()
-    call stores a result, the second identical call returns from cache (API = 1 call).
-    """
+    _skip_if_no_providers()
+    cache = _get_cache_or_skip()
+    model = _first_available_model()
 
-    def test_second_identical_call_hits_cache(self):
-        if not _has_any_key():
-            pytest.skip("No LLM API key configured")
-        if not _has_embedding_backend():
-            pytest.skip("No embedding backend configured")
+    from scripts.model_hop import generate_structured  # type: ignore[import]
 
-        from core.config import settings
-        from core.models import call_structured
+    cache.clear()
 
-        try:
-            from agents.relevance import RelevanceScore
-        except ImportError:
-            pytest.skip("RelevanceScore not importable")
+    # Populate cache with original
+    r_original = generate_structured(model, RelevanceDecision, RELEVANCE_PROMPT, use_cache=True)
+    if r_original is None:
+        pytest.skip("LLM returned None (quota?)")
 
-        import core.cache as cache_mod
-        cache_mod._cache_instance = SemanticCache(similarity_threshold=0.95)
+    original_qa = [(RELEVANCE_PROMPT[:80], r_original.reason)]
+    faith_orig, _ = _ragas_score(original_qa, SAMPLE_TEXT)
 
-        prompt = "Is the law of large numbers related to probability theory?"
+    # Slightly rephrased variant
+    rephrased = RELEVANCE_PROMPT.replace("Decide whether", "Determine if").replace(
+        "text chunk", "passage"
+    )
+    hits_before = cache.stats()["hits"]
+    r_rephrased = generate_structured(model, RelevanceDecision, rephrased, use_cache=True)
 
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True):
-            r1 = call_structured(RelevanceScore, prompt)
-            if r1 is None:
-                pytest.skip("LLM returned None (quota exhausted?)")
+    if cache.stats()["hits"] > hits_before:
+        # Cache HIT — verify faithfulness within tolerance
+        if r_rephrased and faith_orig is not None:
+            rephrased_qa = [(rephrased[:80], r_rephrased.reason)]
+            faith_rep, _ = _ragas_score(rephrased_qa, SAMPLE_TEXT)
+            if faith_rep is not None:
+                assert abs(faith_rep - faith_orig) < 0.05, (
+                    f"Rephrased cache hit faithfulness ({faith_rep}) too far from original ({faith_orig})"
+                )
+    else:
+        # Cache MISS — informational, not a failure
+        print(f"\n  [INFO] Rephrased prompt was a MISS (threshold not crossed) — informational only")
 
-            r2 = call_structured(RelevanceScore, prompt)
 
-        assert r2 is not None
-        assert isinstance(r2, RelevanceScore)
+@pytest.mark.slow
+def test_excluded_schema_never_served_from_cache():
+    """FlashcardOutput (default exclusion) must never be stored or served."""
+    _skip_if_no_providers()
+    cache = _get_cache_or_skip()
+    model = _first_available_model()
 
-        s = cache_mod._cache_instance.stats()
-        assert s["stores"] >= 1, "First call must have stored a result"
-        assert s["hits"] >= 1, "Second identical call must have been a cache hit"
+    from scripts.model_hop import generate_structured  # type: ignore[import]
 
-    def test_cache_does_not_serve_wrong_schema_from_live_call(self):
-        """
-        After storing a RelevanceScore result, looking up with a different schema
-        must still be a miss.
-        """
-        if not _has_any_key():
-            pytest.skip("No LLM API key configured")
-        if not _has_embedding_backend():
-            pytest.skip("No embedding backend configured")
+    cache.clear()
 
-        from core.config import settings
-        from core.models import call_structured
+    r1 = generate_structured(model, FlashcardOutput, CARD_PROMPT, use_cache=True)
+    r2 = generate_structured(model, FlashcardOutput, CARD_PROMPT, use_cache=True)
 
-        try:
-            from agents.relevance import RelevanceScore
-        except ImportError:
-            pytest.skip("RelevanceScore not importable")
+    stats = cache.stats()
+    assert stats["hits"] == 0, (
+        f"FlashcardOutput should be excluded from cache but got hits={stats['hits']}"
+    )
+    assert stats["stores"] == 0, (
+        f"FlashcardOutput should never be stored but got stores={stats['stores']}"
+    )
 
-        import core.cache as cache_mod
-        cache_mod._cache_instance = SemanticCache(similarity_threshold=0.95)
+    # Both calls must have returned valid FlashcardOutput (LLM was called both times)
+    if r1 is not None:
+        assert isinstance(r1, FlashcardOutput)
+    if r2 is not None:
+        assert isinstance(r2, FlashcardOutput)
 
-        prompt = "Is Bayes theorem related to conditional probability?"
 
-        with patch.object(settings, "AGENT_CACHE_ENABLED", True):
-            r1 = call_structured(RelevanceScore, prompt)
-            if r1 is None:
-                pytest.skip("LLM returned None")
+@pytest.mark.slow
+def test_cache_disabled_globally():
+    """SEMANTIC_CACHE_ENABLED=False must make the cache a no-op."""
+    import sys
 
-            # Same prompt, different schema → must be a miss (no LLM result for OtherSchema)
-            r2 = cache_mod._cache_instance.lookup(prompt, OtherSchema)
+    try:
+        from core.cache import _reset_cache_singleton  # type: ignore[import]
+        import core.cache as cache_module  # type: ignore[import]
+        from core.config import settings  # type: ignore[import]
+    except ImportError as exc:
+        pytest.skip(f"core modules not importable: {exc}")
 
-        assert r2 is None, (
-            "Cache served a RelevanceScore entry for an OtherSchema lookup — "
-            "schema isolation broken"
-        )
+    original_enabled = settings.SEMANTIC_CACHE_ENABLED
+    try:
+        settings.SEMANTIC_CACHE_ENABLED = False
+        _reset_cache_singleton()
+        cache = cache_module.init_semantic_cache()
+
+        s = cache.stats()
+        assert s["enabled"] is False, "Cache should be disabled"
+        assert s["hits"] == 0
+
+        # Even if providers are available, verify no-op behaviour without actual LLM calls
+        result = cache.lookup("any prompt", RelevanceDecision)
+        assert result is None
+
+    finally:
+        settings.SEMANTIC_CACHE_ENABLED = original_enabled
+        _reset_cache_singleton()

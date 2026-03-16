@@ -60,7 +60,7 @@ TIER_MODELS: dict[str, list[str]] = {
         "groq/llama-3.3-70b-versatile",         # Groq free tier fallback
         "gemini/gemini-2.0-flash",
         # claude-haiku-4-5-20251001: structured output broken via LiteLLM (empty responses)
-        # claude-3-5-haiku-20241022: 404 on this API tier
+        # Restore once scripts/test_haiku_structured_output.py confirms the fix
     ],
     "balanced": [
         "anthropic/claude-sonnet-4-6",           # paid tier — prioritised
@@ -70,7 +70,7 @@ TIER_MODELS: dict[str, list[str]] = {
     ],
     "reasoning": [
         "anthropic/claude-sonnet-4-6",           # paid tier — prioritised
-        "groq/deepseek-r1-distill-llama-70b",
+        "groq/deepseek-r1-distill-llama-70b",   # DeepSeek-R1 on Groq free tier
         "openai/o3-mini",
     ],
     "quality": [

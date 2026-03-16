@@ -1,245 +1,412 @@
 """
 core/cache.py
 -------------
-Semantic cache for LLM agent calls.
+Semantic cache for LLM structured output, backed by Qdrant and
+all-MiniLM-L6-v2 (local, sentence-transformers, 384-dim).
 
-Stores structured outputs keyed by a semantic embedding of the input prompt.
-Uses an in-memory vector index for cosine-similarity matching.
+Usage
+-----
+    from core.cache import get_cache, init_semantic_cache
 
-Contract
---------
-  cache = get_cache()
-  result = cache.lookup(prompt_str, SchemaClass)        # BaseModel | None
-  cache.store(prompt_str, SchemaClass, result_obj, model_name)
-  stats  = cache.stats()   # {"hits": N, "misses": N, "stores": N}
-  cache.clear()            # test helper — resets entries and stats
+    cache = get_cache()
+    cached = cache.lookup(prompt, MySchema)
+    if cached is None:
+        result = llm_call(...)
+        cache.store(prompt, MySchema, result, model_name)
 
-Embedding backends (tried in order)
-------------------------------------
-  1. sentence-transformers all-MiniLM-L6-v2  (no API key, 384-dim)
-  2. OpenAI text-embedding-3-small           (requires OPENAI_API_KEY)
-
-When neither backend is available the cache is a transparent no-op:
-  lookup() always returns None, store() is silent.
+Graceful degradation
+--------------------
+If Qdrant is unavailable or sentence-transformers is not installed,
+``get_cache()`` returns a ``_NullCache`` — all methods are no-ops.
+``generate_structured()`` never fails due to cache errors.
 """
 
-import logging
-import math
-import threading
-from typing import Optional
+from __future__ import annotations
 
-from pydantic import BaseModel
+import importlib
+import json
+import logging
+import threading
+import time
+import uuid
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
-# Cosine similarity floor for a cache hit (tune via SemanticCache constructor)
-_DEFAULT_THRESHOLD: float = 0.92
 
-# Module-level singleton + its lock
-_cache_instance: Optional["SemanticCache"] = None
-_singleton_lock = threading.Lock()
+# ---------------------------------------------------------------------------
+# Null cache — returned when Qdrant / embeddings are unavailable
+# ---------------------------------------------------------------------------
+
+class _NullCache:
+    """No-op cache returned when the real cache cannot be initialised."""
+
+    _hits = 0
+    _misses = 0
+    _stores = 0
+
+    def lookup(self, prompt: str, schema: type) -> None:  # type: ignore[return]
+        return None
+
+    def store(self, prompt: str, schema: type, result: "BaseModel", model_name: str = "") -> None:
+        pass
+
+    def clear(self) -> None:
+        pass
+
+    def stats(self) -> dict:
+        return {
+            "enabled": False,
+            "hits": 0,
+            "misses": 0,
+            "stores": 0,
+            "hit_rate": 0.0,
+            "collection": None,
+            "threshold": None,
+        }
 
 
 # ---------------------------------------------------------------------------
-# Internal entry
-# ---------------------------------------------------------------------------
-
-class _Entry:
-    __slots__ = ("prompt", "embedding", "result_json", "schema_name", "model")
-
-    def __init__(
-        self,
-        prompt: str,
-        embedding: list[float],
-        result_json: str,
-        schema_name: str,
-        model: str,
-    ) -> None:
-        self.prompt = prompt
-        self.embedding = embedding
-        self.result_json = result_json
-        self.schema_name = schema_name
-        self.model = model
-
-
-# ---------------------------------------------------------------------------
-# Cache class
+# Semantic cache
 # ---------------------------------------------------------------------------
 
 class SemanticCache:
-    """Thread-safe in-memory semantic cache backed by cosine similarity."""
+    """Qdrant-backed semantic cache for Pydantic structured-output results.
 
-    def __init__(self, similarity_threshold: float = _DEFAULT_THRESHOLD) -> None:
-        self._threshold = similarity_threshold
-        self._entries: list[_Entry] = []
-        self._stats: dict[str, int] = {"hits": 0, "misses": 0, "stores": 0}
-        self._lock = threading.Lock()
-        self._embed_fn = _make_embed_fn()
+    Cache key: ``f"{schema.__name__}::{prompt}"`` — schema name is prepended
+    before embedding so that different schemas never collide, even if their
+    prompts are identical.  A secondary Qdrant payload filter on ``schema_name``
+    provides belt-and-suspenders correctness at query time.
+    """
+
+    def __init__(
+        self,
+        qdrant_url: str,
+        qdrant_api_key: str,
+        collection: str,
+        threshold: float,
+        ttl_seconds: int,
+        max_entries: int,
+    ) -> None:
+        self._collection = collection
+        self._threshold = threshold
+        self._ttl_seconds = ttl_seconds
+        self._max_entries = max_entries
+        self._ready = False
+
+        self._hits = 0
+        self._misses = 0
+        self._stores = 0
+
+        # --- Load embedder (same fallback chain as build_ragas_evaluator) ---
+        self._embedder = None
+        import warnings
+        for _import_path in [
+            "langchain_huggingface.HuggingFaceEmbeddings",
+            "langchain_community.embeddings.HuggingFaceEmbeddings",
+        ]:
+            try:
+                module_path, cls_name = _import_path.rsplit(".", 1)
+                mod = importlib.import_module(module_path)
+                HFEmbeddings = getattr(mod, cls_name)
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    self._embedder = HFEmbeddings(model_name="all-MiniLM-L6-v2")
+                logger.debug("SemanticCache: loaded embedder via %s", _import_path)
+                break
+            except Exception as exc:
+                logger.debug("SemanticCache: embedder import failed (%s): %s", _import_path, exc)
+
+        if self._embedder is None:
+            logger.warning(
+                "SemanticCache: sentence-transformers not available — "
+                "install with: pip install sentence-transformers"
+            )
+            return
+
+        # --- Connect to Qdrant ---
+        try:
+            from qdrant_client import QdrantClient
+            from qdrant_client.models import Distance, VectorParams
+
+            self._client = QdrantClient(
+                url=qdrant_url,
+                api_key=qdrant_api_key or None,
+                timeout=5,
+            )
+            # Health check
+            self._client.get_collections()
+
+            # Create collection if absent
+            existing = {c.name for c in self._client.get_collections().collections}
+            if self._collection not in existing:
+                self._client.create_collection(
+                    collection_name=self._collection,
+                    vectors_config=VectorParams(size=384, distance=Distance.COSINE),
+                )
+                logger.info("SemanticCache: created collection '%s'", self._collection)
+
+            self._ready = True
+            logger.info(
+                "SemanticCache: ready (collection=%s, threshold=%.2f)",
+                self._collection,
+                self._threshold,
+            )
+        except Exception as exc:
+            logger.warning("SemanticCache: Qdrant unavailable — %s", exc)
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def lookup(self, prompt: str, schema: type[BaseModel]) -> Optional[BaseModel]:
-        """Return a cached result if a semantically similar entry exists, else None."""
-        if self._embed_fn is None:
-            with self._lock:
-                self._stats["misses"] += 1
+    def lookup(self, prompt: str, schema: type) -> Optional["BaseModel"]:
+        """Return a cached result or None (cache miss)."""
+        if not self._ready:
             return None
 
+        key = f"{schema.__name__}::{prompt}"
         try:
-            emb = self._embed_fn(prompt)
+            vector = self._embed(key)
+            from qdrant_client.models import Filter, FieldCondition, MatchValue
+
+            hits = self._client.search(
+                collection_name=self._collection,
+                query_vector=vector,
+                limit=1,
+                score_threshold=self._threshold,
+                query_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="schema_name",
+                            match=MatchValue(value=schema.__name__),
+                        )
+                    ]
+                ),
+                with_payload=True,
+            )
+
+            if not hits:
+                self._misses += 1
+                return None
+
+            hit = hits[0]
+            payload = hit.payload or {}
+
+            # Client-side TTL eviction
+            if self._ttl_seconds > 0:
+                created_at = payload.get("created_at", 0)
+                if (time.time() - created_at) > self._ttl_seconds:
+                    self._misses += 1
+                    # Lazy delete stale entry
+                    try:
+                        from qdrant_client.models import PointIdsList
+                        self._client.delete(
+                            collection_name=self._collection,
+                            points_selector=PointIdsList(points=[hit.id]),
+                        )
+                    except Exception:
+                        pass
+                    return None
+
+            result_json = payload.get("result_json", "")
+            if not result_json:
+                self._misses += 1
+                return None
+
+            result = schema.model_validate(json.loads(result_json))  # type: ignore[attr-defined]
+            self._hits += 1
+
+            # Fire-and-forget hit count update
+            try:
+                current_hits = payload.get("hit_count", 0) + 1
+                self._client.set_payload(
+                    collection_name=self._collection,
+                    payload={"hit_count": current_hits},
+                    points=[hit.id],
+                )
+            except Exception:
+                pass
+
+            return result
+
         except Exception as exc:
-            logger.debug("Cache embed failed during lookup: %s", exc)
-            with self._lock:
-                self._stats["misses"] += 1
-            return None
-
-        schema_name = schema.__name__
-
-        with self._lock:
-            best_sim: float = 0.0
-            best_entry: Optional[_Entry] = None
-
-            for entry in self._entries:
-                if entry.schema_name != schema_name:
-                    continue
-                sim = _cosine(emb, entry.embedding)
-                if sim > best_sim:
-                    best_sim, best_entry = sim, entry
-
-            if best_entry is not None and best_sim >= self._threshold:
-                try:
-                    result = schema.model_validate_json(best_entry.result_json)
-                    self._stats["hits"] += 1
-                    logger.debug(
-                        "Cache HIT schema=%s sim=%.3f prompt=%.60r",
-                        schema_name, best_sim, prompt,
-                    )
-                    return result
-                except Exception as exc:
-                    logger.warning("Cache deserialisation failed for %s: %s", schema_name, exc)
-
-            self._stats["misses"] += 1
+            logger.debug("SemanticCache.lookup error: %s", exc)
+            self._misses += 1
             return None
 
     def store(
         self,
         prompt: str,
-        schema: type[BaseModel],
-        result: BaseModel,
-        model: str = "unknown",
+        schema: type,
+        result: "BaseModel",
+        model_name: str = "",
     ) -> None:
-        """Store a result keyed by the prompt's embedding. Silent on any error."""
-        if self._embed_fn is None:
+        """Embed and upsert a result into the cache."""
+        if not self._ready:
             return
-        try:
-            emb = self._embed_fn(prompt)
-            result_json = result.model_dump_json()
-            entry = _Entry(
-                prompt=prompt,
-                embedding=emb,
-                result_json=result_json,
-                schema_name=schema.__name__,
-                model=model,
-            )
-            with self._lock:
-                self._entries.append(entry)
-                self._stats["stores"] += 1
-            logger.debug("Cache STORE schema=%s model=%s", schema.__name__, model)
-        except Exception as exc:
-            logger.warning("Cache store failed for %s: %s", schema.__name__, exc)
 
-    def stats(self) -> dict[str, int]:
-        """Return a snapshot of hit/miss/store counts."""
-        with self._lock:
-            return dict(self._stats)
+        key = f"{schema.__name__}::{prompt}"
+        try:
+            vector = self._embed(key)
+            from qdrant_client.models import PointStruct
+
+            point_id = str(uuid.uuid4())
+            payload = {
+                "schema_name": schema.__name__,
+                "prompt_text": prompt[:500],
+                "result_json": result.model_dump_json(),  # type: ignore[attr-defined]
+                "model_name": model_name,
+                "created_at": time.time(),
+                "hit_count": 0,
+            }
+            self._client.upsert(
+                collection_name=self._collection,
+                points=[PointStruct(id=point_id, vector=vector, payload=payload)],
+            )
+            self._stores += 1
+            self._evict_if_needed()
+        except Exception as exc:
+            logger.debug("SemanticCache.store error: %s", exc)
+
+    def stats(self) -> dict:
+        total = self._hits + self._misses
+        return {
+            "enabled": self._ready,
+            "hits": self._hits,
+            "misses": self._misses,
+            "stores": self._stores,
+            "hit_rate": round(self._hits / total, 3) if total > 0 else 0.0,
+            "collection": self._collection,
+            "threshold": self._threshold,
+        }
 
     def clear(self) -> None:
-        """Remove all entries and reset stats. Primarily for tests."""
-        with self._lock:
-            self._entries.clear()
-            self._stats = {"hits": 0, "misses": 0, "stores": 0}
+        """Drop and recreate the cache collection (used in tests and demo)."""
+        if not self._ready:
+            return
+        try:
+            from qdrant_client.models import Distance, VectorParams
 
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self._entries)
-
-
-# ---------------------------------------------------------------------------
-# Embedding backend
-# ---------------------------------------------------------------------------
-
-def _make_embed_fn():
-    """
-    Return a callable(text: str) -> list[float], or None if no backend found.
-    Tries sentence-transformers first (no key), then OpenAI (key required).
-    """
-    # 1. sentence-transformers (preferred — no API key, fully offline)
-    try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
-
-        _model = SentenceTransformer("all-MiniLM-L6-v2")
-
-        def _st_embed(text: str) -> list[float]:
-            return _model.encode(text, normalize_embeddings=True).tolist()
-
-        logger.debug("Semantic cache: using SentenceTransformer all-MiniLM-L6-v2")
-        return _st_embed
-    except ImportError:
-        pass
-    except Exception as exc:
-        logger.warning("SentenceTransformer init failed: %s", exc)
-
-    # 2. OpenAI text-embedding-3-small (requires valid key)
-    try:
-        from langchain_openai import OpenAIEmbeddings  # type: ignore
-        from core.config import settings  # local import to avoid circular at module load
-
-        if settings.OPENAI_API_KEY:
-            _oai = OpenAIEmbeddings(
-                api_key=settings.OPENAI_API_KEY,
-                model="text-embedding-3-small",
+            self._client.delete_collection(self._collection)
+            self._client.create_collection(
+                collection_name=self._collection,
+                vectors_config=VectorParams(size=384, distance=Distance.COSINE),
             )
+            self._hits = 0
+            self._misses = 0
+            self._stores = 0
+            logger.info("SemanticCache: cleared collection '%s'", self._collection)
+        except Exception as exc:
+            logger.warning("SemanticCache.clear error: %s", exc)
 
-            def _oai_embed(text: str) -> list[float]:
-                return _oai.embed_query(text)
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
 
-            logger.debug("Semantic cache: using OpenAI text-embedding-3-small")
-            return _oai_embed
-    except Exception as exc:
-        logger.debug("OpenAI embedding backend unavailable: %s", exc)
+    def _embed(self, text: str) -> list[float]:
+        return self._embedder.embed_query(text)
 
-    logger.warning(
-        "Semantic cache: no embedding backend available "
-        "(install sentence-transformers or set OPENAI_API_KEY). "
-        "Cache will be a no-op."
-    )
-    return None
+    def _evict_if_needed(self) -> None:
+        """Evict oldest entries when the collection exceeds max_entries."""
+        try:
+            count_result = self._client.count(collection_name=self._collection, exact=True)
+            if count_result.count <= self._max_entries:
+                return
+
+            excess = count_result.count - self._max_entries
+            # Scroll oldest entries by created_at (ascending)
+            scroll_result, _ = self._client.scroll(
+                collection_name=self._collection,
+                limit=excess,
+                with_payload=["created_at"],
+                order_by="created_at",  # ascending; oldest first
+            )
+            ids_to_delete = [p.id for p in scroll_result]
+            if ids_to_delete:
+                from qdrant_client.models import PointIdsList
+                self._client.delete(
+                    collection_name=self._collection,
+                    points_selector=PointIdsList(points=ids_to_delete),
+                )
+                logger.debug("SemanticCache: evicted %d old entries", len(ids_to_delete))
+        except Exception as exc:
+            logger.debug("SemanticCache._evict_if_needed error: %s", exc)
 
 
 # ---------------------------------------------------------------------------
-# Cosine similarity
+# Module-level singleton (thread-safe)
 # ---------------------------------------------------------------------------
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    """Cosine similarity between two vectors (handles unnormalised inputs)."""
-    dot = sum(x * y for x, y in zip(a, b))
-    mag_a = math.sqrt(sum(x * x for x in a))
-    mag_b = math.sqrt(sum(x * x for x in b))
-    if mag_a == 0.0 or mag_b == 0.0:
-        return 0.0
-    return dot / (mag_a * mag_b)
+_MODULE_CACHE: SemanticCache | _NullCache | None = None
+_CACHE_LOCK = threading.Lock()
 
 
-# ---------------------------------------------------------------------------
-# Singleton accessor
-# ---------------------------------------------------------------------------
+def init_semantic_cache() -> SemanticCache | _NullCache:
+    """Initialise (or return) the module-level cache singleton.
 
-def get_cache() -> SemanticCache:
-    """Return (or lazily create) the module-level SemanticCache singleton."""
-    global _cache_instance
-    with _singleton_lock:
-        if _cache_instance is None:
-            _cache_instance = SemanticCache()
-        return _cache_instance
+    Reads settings from ``core.config.settings``.  If settings cannot be
+    imported (e.g. standalone use outside the project), falls back to
+    environment variables directly.  Returns a ``_NullCache`` if the cache
+    is disabled or fails to initialise.
+    """
+    global _MODULE_CACHE
+    with _CACHE_LOCK:
+        if _MODULE_CACHE is not None:
+            return _MODULE_CACHE
+
+        # Read settings
+        enabled = True
+        qdrant_url = "http://localhost:6333"
+        qdrant_api_key = ""
+        collection = "nexus_semantic_cache"
+        threshold = 0.92
+        ttl_seconds = 86400
+        max_entries = 10000
+
+        try:
+            from core.config import settings  # type: ignore[import]
+            enabled = settings.SEMANTIC_CACHE_ENABLED
+            qdrant_url = settings.QDRANT_URL
+            qdrant_api_key = settings.QDRANT_API_KEY
+            collection = settings.SEMANTIC_CACHE_COLLECTION
+            threshold = settings.SEMANTIC_CACHE_THRESHOLD
+            ttl_seconds = settings.SEMANTIC_CACHE_TTL_SECONDS
+            max_entries = settings.SEMANTIC_CACHE_MAX_ENTRIES
+        except Exception:
+            import os
+            enabled = os.environ.get("SEMANTIC_CACHE_ENABLED", "true").lower() != "false"
+            qdrant_url = os.environ.get("QDRANT_URL", qdrant_url)
+            qdrant_api_key = os.environ.get("QDRANT_API_KEY", "")
+
+        if not enabled:
+            logger.info("SemanticCache: disabled via SEMANTIC_CACHE_ENABLED=false")
+            _MODULE_CACHE = _NullCache()
+            return _MODULE_CACHE
+
+        cache = SemanticCache(
+            qdrant_url=qdrant_url,
+            qdrant_api_key=qdrant_api_key,
+            collection=collection,
+            threshold=threshold,
+            ttl_seconds=ttl_seconds,
+            max_entries=max_entries,
+        )
+        _MODULE_CACHE = cache if cache._ready else _NullCache()
+        return _MODULE_CACHE
+
+
+def get_cache() -> SemanticCache | _NullCache:
+    """Return the module-level cache singleton, initialising it if needed."""
+    if _MODULE_CACHE is None:
+        return init_semantic_cache()
+    return _MODULE_CACHE
+
+
+def _reset_cache_singleton() -> None:
+    """Reset the module singleton — for tests only."""
+    global _MODULE_CACHE
+    with _CACHE_LOCK:
+        _MODULE_CACHE = None

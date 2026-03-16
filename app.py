@@ -1090,7 +1090,7 @@ def render_flashcard_review_card(db, fc, current_status):
     }
     qtype_label = _QTYPE_DISPLAY.get(fc_question_type, fc_question_type)
 
-    # --- Critic score display ---
+    # --- Critic score display (1-4 scale) ---
     # H16: surface low-quality auto-accepted cards so mentors can spot them
     score_label = (
         f"⚠️ {fc_critic_score}/4 low quality"

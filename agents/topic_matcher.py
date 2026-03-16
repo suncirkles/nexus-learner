@@ -8,7 +8,7 @@ and a document's pre-indexed subtopics.
 import logging
 from typing import List
 from pydantic import BaseModel, Field
-from core.models import get_llm
+from core.models import call_structured
 from langchain_core.prompts import ChatPromptTemplate
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ class TopicMatch(BaseModel):
 
 class TopicMatcherAgent:
     def __init__(self):
-        self.llm = get_llm(purpose="routing").with_structured_output(TopicMatch)
+        pass
 
     def match_topics(self, user_topics: List[str], indexed_subtopics: List[dict]) -> List[TopicMatch]:
         """
@@ -54,11 +54,13 @@ PRE-INDEXED SUBTOPICS:
         results = []
         for ut in user_topics:
             try:
-                match = self.llm.invoke(prompt.format(
-                    context=subtopic_context,
-                    user_topic=ut
-                ))
-                results.append(match)
+                match = call_structured(
+                    TopicMatch,
+                    prompt.format(context=subtopic_context, user_topic=ut),
+                    purpose="routing",
+                )
+                if match is not None:
+                    results.append(match)
             except Exception as e:
                 logger.error(f"Error matching topic '{ut}': {e}")
         

@@ -6,6 +6,7 @@ All values can be overridden via environment variables or a `.env` file.
 """
 
 import os
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -31,6 +32,24 @@ class Settings(BaseSettings):
     QDRANT_API_KEY: str = ""
     QDRANT_COLLECTION_NAME: str = "nexus_chunks"
     
+    # Embeddings (used by IngestionAgent for Qdrant vector storage)
+    # "openai" = OpenAIEmbeddings (requires valid key, 1536 dims, collection = QDRANT_COLLECTION_NAME)
+    # "huggingface" = local all-MiniLM-L6-v2 (no key needed, 384 dims, collection = QDRANT_COLLECTION_NAME + "_hf")
+    EMBEDDING_PROVIDER: str = "openai"
+
+    # Model hopping (free-tier multi-provider routing via LiteLLM)
+    MODEL_HOP_ENABLED: bool = False              # False = original OpenAI/Anthropic only
+    MODEL_HOP_PRIMARY_TIER: str = "balanced"     # tier for purpose="primary"
+    MODEL_HOP_ROUTING_TIER: str = "fast"         # tier for purpose="routing"
+
+    # Agent-level semantic cache (requires core/cache.py + Qdrant — available after merge with master)
+    AGENT_CACHE_ENABLED: bool = False            # False = no caching in production agents
+    # Schemas excluded from caching (non-deterministic agents)
+    SEMANTIC_CACHE_EXCLUDE_SCHEMAS: list[str] = Field(
+        default=["FlashcardOutput"],
+        description="Schema __name__ values never stored in or served from cache",
+    )
+
     # Application State
     AUTO_ACCEPT_CONTENT: bool = False  # If True, bypasses Mentor Review flag
 

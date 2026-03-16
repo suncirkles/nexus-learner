@@ -32,8 +32,11 @@ st.set_page_config(page_title="Nexus Learner - Agentic Learning Platform", layou
 
 logger = logging.getLogger(__name__)
 
-# Initialize Qdrant Client for admin tasks
-qdrant_client = QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY)
+# Lazy-init Qdrant client — first call is deferred until it's actually needed,
+# avoiding the network handshake that was blocking startup.
+@st.cache_resource
+def get_qdrant_client() -> QdrantClient:
+    return QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY)
 
 # Custom CSS for Premium Look & Fixed Button Sizing
 st.markdown("""
@@ -113,7 +116,7 @@ def reset_entire_system():
     Base.metadata.create_all(bind=engine)
 
     try:
-        qdrant_client.delete_collection(collection_name=settings.QDRANT_COLLECTION_NAME)
+        get_qdrant_client().delete_collection(collection_name=settings.QDRANT_COLLECTION_NAME)
     except Exception as e:
         st.error(f"Failed to clear Qdrant: {e}")
 
@@ -163,7 +166,7 @@ def delete_topic_data(topic_id: int, document_id: str):
         # Qdrant Cleanup
         try:
             from qdrant_client.http import models as rest
-            qdrant_client.delete(
+            get_qdrant_client().delete(
                 collection_name=settings.QDRANT_COLLECTION_NAME,
                 points_selector=rest.FilterSelector(
                     filter=rest.Filter(
@@ -205,7 +208,6 @@ def _get_flashcard_source_attribution(db, fc) -> str:
     return ""
 
 
-@st.fragment
 def render_flashcard_list(sub_id, status="approved"):
     db = SessionLocal()
     try:
@@ -308,6 +310,17 @@ def _render_topic_input_section(subject_id: int, suffix: str):
 
 # --- Tab Renderers ---
 
+@st.cache_data(ttl=30)
+def _get_global_flashcard_stats() -> tuple:
+    """Returns (total, approved, pending, rejected) counts. Cached for 30 s."""
+    with get_session() as db:
+        total    = db.query(func.count(Flashcard.id)).scalar() or 0
+        approved = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "approved").scalar() or 0
+        pending  = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "pending").scalar() or 0
+        rejected = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "rejected").scalar() or 0
+    return total, approved, pending, rejected
+
+
 def render_dashboard():
     st.header("🏠 Agentic Learning Dashboard")
     try:
@@ -378,14 +391,12 @@ def render_dashboard():
                                 if "study_topic_id" in st.session_state: del st.session_state.study_topic_id
                                 if "study_subtopic_id" in st.session_state: del st.session_state.study_subtopic_id
                                 st.session_state.active_nav = "🧠 Learner"
+                                st.session_state.sidebar_nav = "🧠 Learner"
                                 st.rerun()
 
         with col_stats:
             st.subheader("Global Stats")
-            total_q = db.query(func.count(Flashcard.id)).scalar()
-            approved_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "approved").scalar()
-            pending_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "pending").scalar()
-            rejected_q = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "rejected").scalar()
+            total_q, approved_q, pending_q, rejected_q = _get_global_flashcard_stats()
             
             st.metric("Approved (Study Ready)", approved_q)
             st.metric("Pending Review", pending_q)
@@ -534,7 +545,7 @@ def render_knowledge_library():
                             # orphaned embeddings linger in the vector store.
                             try:
                                 from qdrant_client.http import models as rest
-                                qdrant_client.delete(
+                                get_qdrant_client().delete(
                                     collection_name=settings.QDRANT_COLLECTION_NAME,
                                     points_selector=rest.FilterSelector(
                                         filter=rest.Filter(
@@ -1135,18 +1146,53 @@ def render_flashcard_review_card(db, fc, current_status):
     if fc_chunk_id:
         chunk = db.query(ContentChunk).filter(ContentChunk.id == fc_chunk_id).first()
         if chunk:
-            with st.expander("📄 Source Snippet"):
-                st.caption("Original source text this card was generated from:")
-                st.text(chunk.text[:1500] + ("…" if len(chunk.text) > 1500 else ""))
+            import html as _html
+            page_num = getattr(chunk, "page_number", None)
+            doc_id_for_img = chunk.document_id
+            img_path = (
+                os.path.join("page_cache", f"{doc_id_for_img}_p{page_num:04d}.png")
+                if page_num is not None and doc_id_for_img
+                else None
+            )
+            has_image = img_path and os.path.exists(img_path)
+
+            if has_image:
+                import base64 as _b64
+                with open(img_path, "rb") as _f:
+                    _img_b64 = _b64.b64encode(_f.read()).decode()
+                st.markdown(
+                    f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Page</summary>"
+                    f"<img src='data:image/png;base64,{_img_b64}' "
+                    f"style='width:100%; margin-top:8px; border-radius:4px;'/>"
+                    f"<div style='font-size:0.75rem; color:#8b949e; margin-top:4px;'>"
+                    f"Page {page_num + 1}</div></details>",
+                    unsafe_allow_html=True,
+                )
+            else:
+                snippet = chunk.text[:1500] + ("…" if len(chunk.text) > 1500 else "")
+                st.markdown(
+                    f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Snippet</summary>"
+                    f"<pre style='white-space:pre-wrap; font-size:0.8rem; margin-top:8px;'>"
+                    f"{_html.escape(snippet)}</pre></details>",
+                    unsafe_allow_html=True,
+                )
 
     # --- Rubric panel ---
     if fc_rubric_json:
         try:
             import json as _json
+            import html as _html
             rubric_items = _json.loads(fc_rubric_json)
-            with st.expander("📋 Grading Rubric"):
-                for item in rubric_items:
-                    st.markdown(f"**{item.get('criterion', '?')}** — {item.get('description', '')}")
+            rows = "".join(
+                f"<p style='margin:4px 0;'><strong>{_html.escape(item.get('criterion','?'))}</strong>"
+                f" — {_html.escape(item.get('description',''))}</p>"
+                for item in rubric_items
+            )
+            st.markdown(
+                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📋 Grading Rubric</summary>"
+                f"<div style='margin-top:8px;'>{rows}</div></details>",
+                unsafe_allow_html=True,
+            )
         except Exception:
             pass
 
@@ -1442,21 +1488,20 @@ def main():
     
     nav_options = ["🏠 Dashboard", "📂 Knowledge Library", "📚 Study Materials", "👨‍🏫 Mentor Review", "🧠 Learner", "⚙️ System Tools"]
     
-    # Initialize navigation state
-    if "active_nav" not in st.session_state:
-        st.session_state.active_nav = nav_options[0]
-        
-    # Sync navigation with sidebar
-    active_nav = st.sidebar.radio("Navigation", nav_options, index=nav_options.index(st.session_state.active_nav), key="sidebar_nav")
-    
-    # If user manually clicks sidebar, update state
-    if active_nav != st.session_state.active_nav:
-        st.session_state.active_nav = active_nav
+    # Initialize navigation widget state (first run only)
+    if "sidebar_nav" not in st.session_state:
+        st.session_state.sidebar_nav = nav_options[0]
+
+    # Radio is the single source of truth — no index override needed
+    active_nav = st.sidebar.radio("Navigation", nav_options, key="sidebar_nav")
+
+    # Always keep active_nav in sync with the radio
+    st.session_state.active_nav = active_nav
 
     # --- Active Background Processes UI ---
     from core.background import background_tasks, stop_background_task, _lock as _bg_lock2
 
-    @st.fragment(run_every=3) # Refresh every 3 seconds if active
+    @st.fragment
     def render_background_monitor():
         with _bg_lock2:
             active_tasks = {id: task for id, task in background_tasks.items() if task.get("status") in ["processing", "failed"]}  # H2: snapshot under lock

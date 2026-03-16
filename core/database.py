@@ -98,6 +98,7 @@ class ContentChunk(Base):
     source_type = Column(String(20), nullable=False, default="pdf")   # "pdf" | "image" | "web" | "text"
     source_url = Column(String(2048), nullable=True)                   # URL if source_type == "web"
     subtopic_id = Column(Integer, ForeignKey("subtopics.id", ondelete="SET NULL"), index=True, nullable=True)
+    page_number = Column(Integer, nullable=True)                       # 0-based page index within the source PDF
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships
@@ -177,12 +178,19 @@ class Flashcard(Base):
 Base.metadata.create_all(bind=engine)
 
 
+_migrations_done = False
+
+
 def _run_migrations():
     """Adds new columns/tables to an existing database without dropping data.
 
     Safe to call on both fresh and legacy databases. Uses PRAGMA table_info
     to detect missing columns before issuing ALTER TABLE.
     """
+    global _migrations_done
+    if _migrations_done:
+        return
+    _migrations_done = True
     with engine.connect() as conn:
         def column_exists(table: str, column: str) -> bool:
             rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
@@ -204,6 +212,8 @@ def _run_migrations():
             ("flashcards", "subject_id", "INTEGER REFERENCES subjects(id) ON DELETE CASCADE"),
             # Chunks are now assigned to a specific subtopic
             ("content_chunks", "subtopic_id", "INTEGER REFERENCES subtopics(id) ON DELETE SET NULL"),
+            # Page provenance for source image rendering
+            ("content_chunks", "page_number", "INTEGER"),
             # Topics are now owned by a document, not a subject
             ("topics", "document_id", "VARCHAR REFERENCES documents(id) ON DELETE CASCADE"),
             # Phase 2.5: atomic content columns on flashcards

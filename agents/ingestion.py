@@ -27,13 +27,52 @@ _TESSERACT_WIN = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 if os.path.exists(_TESSERACT_WIN):
     pytesseract.pytesseract.tesseract_cmd = _TESSERACT_WIN
 
+
+def _is_real_openai_key(key: str) -> bool:
+    """True if the key looks like a real OpenAI key, not a placeholder."""
+    return bool(key) and key.startswith("sk-") and len(key) > 20
+
+
+def _make_embeddings():
+    """Return (embeddings, collection_name).
+
+    Provider is controlled by settings.EMBEDDING_PROVIDER:
+    - "openai"      : OpenAIEmbeddings (requires a valid key, 1536-dim collection)
+    - "huggingface" : local all-MiniLM-L6-v2 (no key, 384-dim, "_hf" collection suffix)
+
+    If provider="openai" but the key is absent/placeholder, auto-falls back to
+    HuggingFace with a warning so CI stays green without an OpenAI account.
+    """
+    use_hf = settings.EMBEDDING_PROVIDER.lower() == "huggingface"
+
+    if not use_hf:
+        if _is_real_openai_key(settings.OPENAI_API_KEY):
+            return OpenAIEmbeddings(api_key=settings.OPENAI_API_KEY), settings.QDRANT_COLLECTION_NAME
+        logger.warning(
+            "EMBEDDING_PROVIDER=openai but key is absent/invalid — "
+            "falling back to HuggingFace embeddings"
+        )
+
+    try:
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings
+        except ImportError:
+            from langchain_community.embeddings import HuggingFaceEmbeddings  # type: ignore[no-redef]
+        logger.info("Using HuggingFace all-MiniLM-L6-v2 embeddings (384 dims)")
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        collection = settings.QDRANT_COLLECTION_NAME + "_hf"
+        return embeddings, collection
+    except Exception as e:
+        raise ValueError(
+            "HuggingFace embeddings unavailable. "
+            "Install sentence-transformers: pip install sentence-transformers. "
+            f"Original error: {e}"
+        )
+
+
 class IngestionAgent:
     def __init__(self):
-        # Using OpenAI embeddings for standard text chunking
-        # TODO: Fallback/Pluggable embeddings
-        if not settings.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY required for Embeddings in MVP")
-        self.embeddings = OpenAIEmbeddings(api_key=settings.OPENAI_API_KEY)
+        self.embeddings, self.collection_name = _make_embeddings()
         
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
@@ -167,7 +206,7 @@ class IngestionAgent:
                 lc_documents,
                 self.embeddings,
                 url=settings.QDRANT_URL,
-                collection_name=settings.QDRANT_COLLECTION_NAME
+                collection_name=self.collection_name,
             )
         finally:
              db.close()

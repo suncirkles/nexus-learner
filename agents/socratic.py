@@ -47,7 +47,24 @@ CRITICAL GUIDELINES:
 3. If the text lacks significant testable content, return an empty list.
 4. For each flashcard include EXACTLY 3 rubric criteria.
 5. Cite the specific part of the source that supports the answer in the rubric.
-6. suggested_complexity: simple (recall only), medium (synthesis/application), complex (multi-step reasoning).
+6. suggested_complexity — Bloom's Taxonomy / CBSE HOTS:
+   simple  = answer is a single fact directly quotable from one sentence in the source (Remember/Understand).
+             Action verbs: Define, List, State, Identify, Summarize.
+   medium  = requires applying a concept, multi-step reasoning, or comparing/contrasting ideas in the source (Apply/Analyse).
+             Action verbs: Calculate, Solve, Compare, Contrast, Explain.
+   complex = requires evaluation, justification, design, or Transfer of Learning to a novel context NOT described in the source (Evaluate/Create — HOTS only).
+             Action verbs: Justify, Criticise, Formulate, Design, Integrate.
+             RULE: if the answer can be directly quoted from one passage → simple or medium, never complex.
+             Default to medium when uncertain.
+7. SELF-CONTAINED RULE (applies to ALL question types):
+   The question text MUST include every piece of data the student needs to answer it.
+   NEVER write phrases like "Using Table 1...", "From the figure...", "Based on the data above...",
+   "Refer to the table...", "According to the graph..." unless the actual table/figure/data
+   is embedded directly inside the question text.
+   If the source text contains a garbled, OCR-mangled, or partially illegible table, you MUST
+   synthesise a clean, internally consistent replacement with the same concept and units.
+   Synthesised data is allowed — it does not need to come verbatim from the source —
+   but it MUST be conceptually correct and every number in the question must match the answer exactly.
 """
 
 PROMPTS: Dict[str, str] = {
@@ -75,6 +92,18 @@ The answer should outline the key steps/components a complete response must incl
     "numerical": f"""You are an expert educator generating Numerical/Derivation flashcards.
 Focus on: step-by-step derivations, calculations, or proofs drawn from the source.
 Each step in the answer must be linked to a formula or statement in the source text.
+
+NUMERICAL-SPECIFIC RULES (in addition to CRITICAL GUIDELINES below):
+- The question MUST be entirely self-contained. Embed ALL required data — tables, given values,
+  formulas, equations — directly inside the question text using Markdown.
+- Format data tables as Markdown: | Hour | Temp (°F) | ... with a header separator row.
+- If the source has an OCR-garbled or partially illegible table, synthesise a clean equivalent:
+  same concept, same units, consistent values. Example: if the source discusses hourly temperature
+  data but the table is unreadable, create a small clean table (5–8 rows) with plausible values.
+- The numbers in your embedded table MUST match the numbers used in your answer exactly.
+  Cross-check before finalising: every quantity referenced in "Calculate..." must appear in the question.
+- NEVER reference "Table 1", "Table 2", "the table above", "the figure", or "the graph" as
+  external resources. If you need a table, build it and put it in the question.
 {_BASE_RULES}""",
 
     "scenario": f"""You are an expert educator generating Scenario-based flashcards.
@@ -114,6 +143,7 @@ class SocraticAgent:
         subtopic_id: int = None,
         subject_id: int = None,
         question_type: str = "active_recall",
+        context: str = "",
     ) -> dict:
         """Generates flashcard(s) based on a chunk and stages them to the database.
 

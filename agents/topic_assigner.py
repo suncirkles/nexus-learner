@@ -21,7 +21,7 @@ class TopicAssignment(BaseModel):
 
 class TopicAssignerAgent:
     def __init__(self):
-        self.llm = get_llm(purpose="routing").with_structured_output(TopicAssignment)
+        pass
 
     def assign_topic(self, chunk_text: str, existing_hierarchy: List[dict] = None) -> TopicAssignment:
         """
@@ -55,10 +55,11 @@ RULES:
         ])
 
         try:
-            result = self.llm.invoke(prompt.format(
-                hierarchy_context=hierarchy_str,
-                text=chunk_text[:3000]
-            ))
+            llm = get_llm(purpose="routing", temperature=0)
+            chain = prompt | llm.with_structured_output(TopicAssignment)
+            result = chain.invoke({"hierarchy_context": hierarchy_str, "text": chunk_text[:3000]})
+            if result is None:
+                raise RuntimeError("LLM returned None for topic assignment")
             # Normalize
             result.topic_name = result.topic_name.strip()
             result.subtopic_name = result.subtopic_name.strip()

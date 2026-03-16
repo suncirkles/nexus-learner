@@ -13,7 +13,7 @@ import logging
 from typing import Optional
 
 from pydantic import BaseModel
-from core.models import get_llm
+from core.models import call_structured
 from core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -26,6 +26,12 @@ class SafetyResult(BaseModel):
     filtered_text: str = ""
 
 
+class _TopicRelevance(BaseModel):
+    """Internal structured output for topic relevance checks."""
+    is_relevant: bool
+    reason: str
+
+
 class SafetyAgent:
     """LLM-powered safety classifier used by the web ingestion pipeline."""
 
@@ -34,8 +40,7 @@ class SafetyAgent:
         "You are a content safety classifier. Determine if the following subject is appropriate "
         "for an educational platform. Block subjects that involve: hate speech, violence, sexual content, "
         "illegal activities, self-harm, or dangerous/harmful material.\n"
-        "Subject: {subject_name}\n"
-        'Return ONLY valid JSON with this exact schema: {{"is_safe": bool, "reason": str}}'
+        "Subject: {subject_name}"
     )
 
     # Prompt for per-page content screening
@@ -43,9 +48,8 @@ class SafetyAgent:
         "You are a content safety classifier for an educational platform. Analyze this text and:\n"
         "1. Determine if it contains harmful, hateful, sexual, violent, or illegal content\n"
         "2. Determine if it is relevant to educational/technical learning\n"
-        "3. If safe and relevant, return the cleaned text; if not, return empty string\n"
-        "Text: {text}\n"
-        'Return ONLY valid JSON with this exact schema: {{"is_safe": bool, "reason": str, "filtered_text": str}}'
+        "3. If safe and relevant, set filtered_text to the cleaned text; if not, set filtered_text to empty string\n"
+        "Text: {text}"
     )
 
     # Prompt for per-topic relevance check
@@ -53,12 +57,11 @@ class SafetyAgent:
         "You are a relevance classifier. Determine whether the following topic is directly "
         "related to the given subject for an educational course.\n"
         "Subject: {subject_name}\n"
-        "Topic: {topic}\n"
-        'Return ONLY valid JSON with this exact schema: {{"is_relevant": bool, "reason": str}}'
+        "Topic: {topic}"
     )
 
     def __init__(self):
-        self._llm = get_llm(purpose="routing", temperature=0.0)
+        pass
 
     # ------------------------------------------------------------------
     # Public interface
@@ -75,12 +78,10 @@ class SafetyAgent:
 
         prompt = self._SUBJECT_PROMPT.format(subject_name=subject_name)
         try:
-            response = self._llm.invoke(prompt)
-            data = self._parse_json(response.content)
-            return SafetyResult(
-                is_safe=bool(data.get("is_safe", False)),
-                reason=str(data.get("reason", "")),
-            )
+            result = call_structured(SafetyResult, prompt, purpose="routing")
+            if result is None:
+                return SafetyResult(is_safe=True, reason="Safety check returned None (defaulting to safe)")
+            return result
         except Exception as exc:
             logger.error("Subject safety check failed for '%s': %s", subject_name, exc)
             # Default to SAFE on classifier error so we don't silently block every request
@@ -100,14 +101,17 @@ class SafetyAgent:
         truncated = text[:4000]
         prompt = self._CONTENT_PROMPT.format(text=truncated)
         try:
-            response = self._llm.invoke(prompt)
-            data = self._parse_json(response.content)
-            is_safe = bool(data.get("is_safe", False))
-            return SafetyResult(
-                is_safe=is_safe,
-                reason=str(data.get("reason", "")),
-                filtered_text=text if is_safe else "",
-            )
+            result = call_structured(SafetyResult, prompt, purpose="routing")
+            if result is None:
+                return SafetyResult(
+                    is_safe=False,
+                    reason="Safety check returned None (defaulting to unsafe)",
+                    filtered_text="",
+                )
+            # Preserve original (non-truncated) text when safe
+            if result.is_safe and not result.filtered_text:
+                result.filtered_text = text
+            return result
         except Exception as exc:
             logger.error("Content safety check failed for '%s': %s", source_url or "unknown", exc)
             # Default to UNSAFE on classifier error — better to skip a page than ingest bad content
@@ -124,9 +128,10 @@ class SafetyAgent:
 
         prompt = self._RELEVANCE_PROMPT.format(subject_name=subject_name, topic=topic)
         try:
-            response = self._llm.invoke(prompt)
-            data = self._parse_json(response.content)
-            return bool(data.get("is_relevant", True))
+            result = call_structured(_TopicRelevance, prompt, purpose="routing")
+            if result is None:
+                return True
+            return result.is_relevant
         except Exception as exc:
             logger.error("Topic relevance check failed for '%s': %s", topic, exc)
             # Default to relevant on error so we don't drop valid topics silently

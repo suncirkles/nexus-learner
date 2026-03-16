@@ -12,7 +12,7 @@ import logging
 from math import ceil
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from core.models import get_llm
+from core.models import get_llm, call_structured_chain
 from core.database import SessionLocal, Flashcard
 from core.config import settings
 
@@ -33,12 +33,24 @@ class RubricEvaluation(BaseModel):
         ge=1, le=4,
     )
     clarity_score: int = Field(
-        description="1-4: Is the question/answer unambiguous and well-phrased? 4=crystal clear, 1=confusing.",
+        description=(
+            "1-4: Is the question/answer unambiguous and well-phrased? 4=crystal clear, 1=confusing. "
+            "CRITICAL: if the question refers to 'Table N', 'the table', 'the figure', 'the graph', "
+            "or any external dataset that is NOT actually embedded in the question text, assign 1 — "
+            "the student has no way to answer without the missing data."
+        ),
         ge=1, le=4,
     )
     feedback: str = Field(description="Brief explanation justifying the scores.")
     suggested_complexity: str = Field(
-        description="Complexity of this card: simple | medium | complex. Use the heuristic: grounding>=3 and logic<=2 → simple; grounding>=3 and logic=3 → medium; logic=4 and accuracy=4 → complex."
+        description=(
+            "Complexity of this card using Bloom's Taxonomy (CBSE HOTS framework): "
+            "simple = answer is a single fact directly quotable from one sentence in the source (Remember/Understand); "
+            "medium = requires applying a concept, multi-step assembly, or comparing ideas (Apply/Analyse); "
+            "complex = requires evaluation, justification, design, or transfer to an unfamiliar context — "
+            "a card whose answer can be directly quoted is NEVER complex (Evaluate/Create). "
+            "Default to medium when uncertain."
+        )
     )
 
 
@@ -49,13 +61,41 @@ Score each dimension on a scale of 1–4:
 - accuracy_score  (1-4): Is the answer factually correct per the source?
 - logic_score     (1-4): Is the reasoning sound?
 - grounding_score (1-4): Is the answer directly traceable to text in the source?
-- clarity_score   (1-4): Is the question/answer unambiguous?
+- clarity_score   (1-4): Is the question/answer unambiguous and fully self-contained?
 
-Complexity heuristic (apply exactly):
-- grounding_score >= 3 AND logic_score <= 2  → simple
-- grounding_score >= 3 AND logic_score == 3  → medium
-- logic_score == 4 AND accuracy_score == 4   → complex
-- otherwise                                  → medium
+PHANTOM DATA REFERENCE — INSTANT FAIL:
+If the question mentions "Table 1", "Table 2", "the table", "the data table", "the figure",
+"the graph", "the chart", or ANY external dataset/figure that is NOT actually embedded
+inside the question text as a Markdown table or explicit list of values, this is a critical flaw:
+  → Set clarity_score = 1 (student cannot answer — required data is missing from the question)
+  → Set grounding_score = 1 (question is not self-contained)
+A question that says "Using the temperature data table, calculate..." with NO table in the
+question text scores clarity = 1, grounding = 1, and will be auto-rejected.
+
+Complexity classification — Bloom's Taxonomy / CBSE HOTS framework:
+
+SIMPLE   (Bloom's: Remember / Understand)
+  • The answer is a single fact that can be directly quoted or paraphrased from ONE sentence in the source.
+  • A student who has read the passage once can answer it with no additional reasoning.
+  • Typical action verbs: Define, List, State, Identify, Summarize.
+  • Score signal: grounding_score = 4 AND logic_score ≤ 2.
+
+MEDIUM   (Bloom's: Apply / Analyse)
+  • Requires "horizontal" thinking: applying a formula/concept to a scenario, explaining a
+    multi-step process, or comparing/contrasting ideas — but all evidence is in the source.
+  • Typical action verbs: Calculate, Solve, Compare, Contrast, Explain, Illustrate.
+  • Score signal: grounding_score ≥ 3 AND logic_score = 3.
+
+COMPLEX  (Bloom's: Evaluate / Create — HOTS only)
+  • Requires "vertical" integration: connecting concepts across different sections, evaluating or
+    justifying a claim, designing a solution, OR applying a principle to a completely novel/unfamiliar
+    scenario not described in the source (Transfer of Learning).
+  • CRITICAL RULE: if the answer can be directly quoted from a single passage → NOT complex.
+  • Typical action verbs: Justify, Criticise, Formulate, Design, Integrate, Evaluate.
+  • Score signal: logic_score = 4 AND accuracy_score = 4 AND grounding_score ≤ 3
+    (synthesis is required — the answer cannot be found in a single passage).
+
+DEFAULT: when in doubt, assign MEDIUM. Reserve COMPLEX for genuine HOTS questions only.
 
 Return structured output with all 6 fields."""),
     ("user", "Source Text:\n{source_text}\n\nGenerated Question: {question}\nGenerated Answer: {answer}"),
@@ -76,8 +116,10 @@ def _aggregate(acc: int, log: int, grd: int, cla: int) -> int:
 
 class CriticAgent:
     def __init__(self):
-        self.llm = get_llm(purpose="primary", temperature=0.0)
-        self.chain = _EVAL_PROMPT | self.llm.with_structured_output(RubricEvaluation)
+        self._chain = self._build_chain()
+
+    def _build_chain(self):
+        return _EVAL_PROMPT | get_llm(purpose="primary", temperature=0.0).with_structured_output(RubricEvaluation)
 
     def evaluate_flashcard(
         self,
@@ -88,11 +130,14 @@ class CriticAgent:
     ) -> dict:
         """Evaluates a flashcard, writes 4-score rubric + aggregate to DB."""
         try:
-            eval_result = self.chain.invoke({
-                "source_text": source_text,
-                "question": question,
-                "answer": answer,
-            })
+            # Rebuild chain per-call when hopping so provider selection is fresh
+            if settings.MODEL_HOP_ENABLED:
+                self._chain = self._build_chain()
+            eval_result = call_structured_chain(
+                self._chain,
+                RubricEvaluation,
+                {"source_text": source_text, "question": question, "answer": answer},
+            )
             acc = _clamp(eval_result.accuracy_score, 1, 4)
             log = _clamp(eval_result.logic_score, 1, 4)
             grd = _clamp(eval_result.grounding_score, 1, 4)
@@ -126,19 +171,25 @@ class CriticAgent:
             # Write suggested_complexity so Mentor HITL can pre-populate the selectbox
             fc.complexity_level = suggested_complexity
 
-            # Auto-reject rule: grounding_score < 2 means answer is not in the source
-            if grd < 2:
+            # Auto-reject rule 1: answer not traceable to source
+            # Auto-reject rule 2: phantom data reference (table/figure mentioned but not embedded)
+            #   — critic sets clarity=1 when question references unavailable external data
+            should_reject = grd < 2 or cla < 2
+            reject_reason = (
+                f"grounding_score={grd}/4" if grd < 2 else f"clarity_score={cla}/4 (phantom data reference)"
+            )
+            if should_reject:
                 if settings.AUTO_ACCEPT_CONTENT:
                     logger.warning(
-                        "Flashcard %d grounding_score=%d/4 (not in source) but AUTO_ACCEPT_CONTENT=True "
+                        "Flashcard %d %s but AUTO_ACCEPT_CONTENT=True "
                         "— card remains approved. Feedback: %s",
-                        flashcard_id, grd, feedback,
+                        flashcard_id, reject_reason, feedback,
                     )
                 else:
                     fc.status = "rejected"
                     logger.info(
-                        "Flashcard %d auto-rejected (grounding_score=%d/4). Feedback: %s",
-                        flashcard_id, grd, feedback,
+                        "Flashcard %d auto-rejected (%s). Feedback: %s",
+                        flashcard_id, reject_reason, feedback,
                     )
 
             db.commit()

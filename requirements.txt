@@ -24,3 +24,7 @@ lxml>=5.0.0
 requests>=2.31.0
 langchain-groq>=0.2.0
 langchain-google-genai>=2.0.0
+litellm>=1.0.0
+langchain-litellm>=0.1.0
+sentence-transformers>=2.2.0
+langchain-huggingface>=0.1.0

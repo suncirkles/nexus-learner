@@ -1,65 +1,162 @@
 """
 scripts/model_hop.py
 ---------------------
-Reusable multi-provider model hopping utilities for Nexus Learner experiments.
+Portable multi-provider model hopping utilities backed by LiteLLM.
 
-Provides a thin, composable layer on top of core.models.get_llm() that makes
-it easy to:
-  - instantiate any configured provider (OpenAI, Anthropic, Groq, Google)
-  - bind structured output with automatic json_mode fallback
-  - detect quota / rate-limit errors across all providers
-  - generate structured output with graceful quota handling
-  - discover which providers have API keys configured
-  - run RAGAS faithfulness + response-relevancy benchmarks across providers
+Zero project-specific dependencies — works with any LangChain project.
+LiteLLM reads standard env vars automatically:
+    OPENAI_API_KEY, ANTHROPIC_API_KEY, GROQ_API_KEY,
+    GOOGLE_API_KEY / GEMINI_API_KEY, DEEPSEEK_API_KEY
 
-Intended to be imported by experiment scripts, not the main application.
+Provides:
+  - get_llm()              — instantiate any LiteLLM-backed chat model
+  - bind_structured()      — structured output with json_mode fallback
+  - is_quota_error()       — detect quota/rate-limit errors across providers
+  - generate_structured()  — structured output with quota handling + semantic cache
+  - available_providers()  — discover providers with API keys configured
+  - build_ragas_evaluator()— build RAGAS evaluator LLM + embeddings
+  - run_ragas_benchmark()  — run RAGAS faithfulness + response relevancy
+  - print_ragas_table()    — print formatted comparison table
 
-Usage
------
-    from scripts.model_hop import (
-        get_llm, bind_structured, is_quota_error,
-        generate_structured, available_providers,
-        build_ragas_evaluator, run_ragas_benchmark, print_ragas_table,
-    )
+Model selection
+---------------
+Three ways to select a model:
 
-    llm = get_llm("groq", purpose="routing")
-    structured = bind_structured(llm, MySchema)
-    result = generate_structured("google", MySchema, prompt)
+1. Explicit LiteLLM model string:
+       llm = get_llm("groq/llama-3.3-70b-versatile")
 
-    providers = available_providers()          # {"Gemini 2.0 Flash": ("google", "primary"), ...}
-    eval_llm, eval_emb = build_ragas_evaluator()
-    scores = run_ragas_benchmark(
-        {"Claude": claude_cards, "Groq": groq_cards},
-        eval_llm, eval_emb,
-        context=source_text,
-    )
-    print_ragas_table(scores)
+2. Tier-based (walks priority list, returns first model with a key set):
+       llm = get_llm(tier="fast")       # routing, classification
+       llm = get_llm(tier="balanced")   # generation, extraction
+       llm = get_llm(tier="reasoning")  # critic, analysis, multi-step
+       llm = get_llm(tier="quality")    # paid baselines
+
+3. Task-name sugar (maps task → tier internally):
+       llm = get_llm(task="routing")    # same as tier="fast"
+       llm = get_llm(task="generation") # same as tier="balanced"
 """
 
 from __future__ import annotations
 
+import importlib
+import os
 import warnings
 from typing import Any, Optional, TYPE_CHECKING
+
+import litellm
+litellm.drop_params = True  # silently drop unsupported params (e.g. tool_choice=any on Gemini)
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
     from langchain_core.language_models.chat_models import BaseChatModel
 
 # ---------------------------------------------------------------------------
+# Tier / task configuration
+# ---------------------------------------------------------------------------
+
+TIER_MODELS: dict[str, list[str]] = {
+    "fast": [
+        "groq/llama-3.3-70b-versatile",
+        "gemini/gemini-2.0-flash",
+        "anthropic/claude-haiku-4-5-20251001",
+    ],
+    "balanced": [
+        "gemini/gemini-2.0-flash",
+        "anthropic/claude-sonnet-4-6",
+        "deepseek/deepseek-chat",
+        "openai/gpt-4o",
+    ],
+    "reasoning": [
+        "groq/deepseek-r1-distill-llama-70b",   # DeepSeek-R1 on Groq free tier
+        "anthropic/claude-sonnet-4-6",
+        "openai/o3-mini",
+    ],
+    "quality": [
+        "anthropic/claude-opus-4-6",
+        "openai/gpt-4o",
+        "anthropic/claude-sonnet-4-6",
+    ],
+}
+
+TASK_TIERS: dict[str, str] = {
+    "routing":        "fast",
+    "classification": "fast",
+    "generation":     "balanced",
+    "primary":        "balanced",
+    "extraction":     "balanced",
+    "structured":     "balanced",
+    "reasoning":      "reasoning",
+    "analysis":       "reasoning",
+    "critic":         "reasoning",
+    "quality":        "quality",
+    "evaluation":     "quality",
+}
+
+# Maps LiteLLM provider prefix → env var names that signal key presence
+KEY_MAP: dict[str, list[str]] = {
+    "groq/":       ["GROQ_API_KEY"],
+    "gemini/":     ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+    "anthropic/":  ["ANTHROPIC_API_KEY"],
+    "deepseek/":   ["DEEPSEEK_API_KEY"],
+    "openai/":     ["OPENAI_API_KEY"],
+}
+
+# ---------------------------------------------------------------------------
 # Provider utilities
 # ---------------------------------------------------------------------------
 
+def _pick_model_for_tier(tier: str) -> str:
+    """Return the first model in the tier whose provider key is set.
+
+    Raises RuntimeError if no key is found for any model in the tier.
+    """
+    candidates = TIER_MODELS.get(tier)
+    if not candidates:
+        raise ValueError(f"Unknown tier: {tier!r}. Available: {list(TIER_MODELS)}")
+    for model in candidates:
+        for prefix, env_vars in KEY_MAP.items():
+            if model.startswith(prefix):
+                if any(os.environ.get(v) for v in env_vars):
+                    print(f"  [model_hop] tier={tier!r} → {model}")
+                    return model
+                break
+    tried = ", ".join(candidates)
+    raise RuntimeError(
+        f"No API key found for any model in tier={tier!r}. "
+        f"Tried: {tried}. Set the appropriate key env var."
+    )
+
+
 def get_llm(
-    provider: str,
-    purpose: str = "primary",
+    model: Optional[str] = None,
+    *,
+    tier: Optional[str] = None,
+    task: Optional[str] = None,
     temperature: float = 0.0,
 ) -> "BaseChatModel":
-    """Return an LLM for the given provider and purpose.
+    """Return a LiteLLM-backed chat model.
 
-    Thin wrapper around core.models.get_llm() — all provider/key logic lives there.
+    Exactly one of model, tier, or task should be provided.
+
+    Args:
+        model:       Explicit LiteLLM model string, e.g. "groq/llama-3.3-70b-versatile"
+        tier:        Tier name — "fast" | "balanced" | "reasoning" | "quality"
+        task:        Task name — walks TASK_TIERS to resolve tier automatically
+        temperature: Sampling temperature (default 0.0)
     """
-    from core.models import get_llm as _get_llm
-    return _get_llm(purpose=purpose, provider=provider, temperature=temperature)
+    from langchain_litellm import ChatLiteLLM
+
+    if task is not None:
+        resolved_tier = TASK_TIERS.get(task)
+        if resolved_tier is None:
+            raise ValueError(f"Unknown task: {task!r}. Available: {list(TASK_TIERS)}")
+        model = _pick_model_for_tier(resolved_tier)
+    elif tier is not None:
+        model = _pick_model_for_tier(tier)
+    elif model is None:
+        raise ValueError("Provide model=, tier=, or task=")
+
+    return ChatLiteLLM(model=model, temperature=temperature)
 
 
 def bind_structured(llm: "BaseChatModel", schema: type["BaseModel"]) -> Any:
@@ -79,67 +176,125 @@ def is_quota_error(exc: Exception) -> bool:
 
     Distinguishes infrastructure-level throttling (not a code bug) from actual
     programming errors, so callers can skip gracefully instead of hard-failing.
-    Checks for error signatures across OpenAI, Anthropic, Groq, and Google APIs.
+    Checks LiteLLM exception types first, then falls back to string matching
+    across OpenAI, Anthropic, Groq, Google, and DeepSeek error signatures.
     """
+    # Check LiteLLM typed exceptions first (most reliable)
+    try:
+        from litellm import exceptions as _le
+        if isinstance(exc, (_le.RateLimitError, _le.BudgetExceededError,
+                            _le.AuthenticationError)):
+            return True
+    except (ImportError, AttributeError):
+        pass
+
     msg = str(exc).upper()
     return any(kw in msg for kw in (
-        "RESOURCE_EXHAUSTED",   # Google
-        "RATE_LIMIT_EXCEEDED",  # OpenAI / Groq
-        "INSUFFICIENT_QUOTA",   # OpenAI billing
-        "429",                  # HTTP status code (all providers)
-        "OVERLOADED",           # Anthropic
-        "TOO MANY REQUESTS",    # generic
+        "RESOURCE_EXHAUSTED",       # Google
+        "RATE_LIMIT_EXCEEDED",      # OpenAI / Groq
+        "RATELIMITERROR",           # LiteLLM class name in message
+        "INSUFFICIENT_QUOTA",       # OpenAI billing
+        "EXCEEDED YOUR CURRENT QUOTA",  # OpenAI billing (alt phrasing)
+        "INSUFFICIENT BALANCE",     # DeepSeek — account needs top-up
+        "INSUFFICIENT_BALANCE",     # DeepSeek alternate encoding
+        "402",                      # HTTP payment required (DeepSeek balance)
+        "429",                      # HTTP rate limit (all providers)
+        "OVERLOADED",               # Anthropic
+        "TOO MANY REQUESTS",        # generic
     ))
 
 
 def generate_structured(
-    provider: str,
+    model: str,
     schema: type["BaseModel"],
     prompt: str,
-    purpose: str = "primary",
     temperature: float = 0.0,
+    use_cache: bool = True,
 ) -> Optional["BaseModel"]:
-    """Generate structured output from the given provider.
+    """Generate structured output from the given model or tier.
 
-    Returns the parsed schema instance on success, or None if the provider's
-    quota is exhausted (prints a warning). Raises on genuine errors.
+    Args:
+        model:       LiteLLM model string (e.g. "gemini/gemini-2.0-flash") OR
+                     tier name (e.g. "balanced") OR task name (e.g. "generation")
+        schema:      Pydantic model class for structured output
+        prompt:      Input prompt
+        temperature: Sampling temperature
+        use_cache:   Whether to use semantic cache (default True). Schemas listed
+                     in SEMANTIC_CACHE_EXCLUDE_SCHEMAS bypass cache regardless.
+
+    Returns the parsed schema instance on success, or None if quota is
+    exhausted (prints a warning). Raises on genuine errors.
     """
+    # Schema-level exclusion check (reads config, graceful on ImportError)
+    _cache = None
+    if use_cache:
+        try:
+            from core.config import settings  # type: ignore[import]
+            if schema.__name__ in settings.SEMANTIC_CACHE_EXCLUDE_SCHEMAS:
+                use_cache = False  # honour per-schema exclusion
+        except Exception:
+            pass
+
+    # Cache lookup (lazy init, never raises)
+    if use_cache:
+        try:
+            from core.cache import get_cache  # type: ignore[import]
+            _cache = get_cache()
+            cached = _cache.lookup(prompt, schema)
+            if cached is not None:
+                print(f"  [cache HIT] {schema.__name__} — served from semantic cache")
+                return cached
+        except Exception:
+            _cache = None
+
+    if model in TIER_MODELS:
+        llm = get_llm(tier=model, temperature=temperature)
+    elif model in TASK_TIERS:
+        llm = get_llm(task=model, temperature=temperature)
+    else:
+        llm = get_llm(model=model, temperature=temperature)
+
+    result = None
     try:
-        llm = get_llm(provider, purpose=purpose, temperature=temperature)
         structured = bind_structured(llm, schema)
-        return structured.invoke(prompt)
+        result = structured.invoke(prompt)
     except Exception as e:
         if is_quota_error(e):
-            print(f"  [WARN] {provider} quota/rate-limit: {_short_error(e)}")
+            model_name = getattr(llm, "model", model)
+            print(f"  [WARN] quota/rate-limit ({model_name}): {_short_error(e)}")
             return None
         raise
 
+    # Cache store (non-blocking, failure-safe)
+    if use_cache and _cache is not None and result is not None:
+        try:
+            _cache.store(prompt, schema, result, getattr(llm, "model", model))
+        except Exception:
+            pass
 
-def available_providers(include_openai: bool = True) -> dict[str, tuple[str, str]]:
-    """Return providers that have API keys configured in settings.
+    return result
 
-    Returns a dict mapping display label → (provider_id, purpose).
-    The "purpose" is the recommended use for each provider in the Nexus
-    free-tier strategy:
-        google   → primary  (generation)
-        anthropic → primary (generation / paid baseline)
-        groq     → routing  (classification)
-        openai   → primary  (paid baseline, if available)
+
+def available_providers(include_openai: bool = True) -> dict[str, str]:
+    """Return providers that have API keys configured.
+
+    Returns a dict mapping display label → LiteLLM model string.
 
     Args:
         include_openai: If False, skip OpenAI even if key is present (useful
                         when you know the account is over quota).
     """
-    from core.config import settings
-    providers: dict[str, tuple[str, str]] = {}
-    if settings.GOOGLE_API_KEY:
-        providers["Gemini 2.0 Flash"] = ("google", "primary")
-    if settings.ANTHROPIC_API_KEY:
-        providers["Claude Sonnet"] = ("anthropic", "primary")
-    if settings.GROQ_API_KEY:
-        providers["Groq Llama-3.3-70B"] = ("groq", "routing")
-    if include_openai and settings.OPENAI_API_KEY:
-        providers["GPT-4o"] = ("openai", "primary")
+    providers: dict[str, str] = {}
+    if os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+        providers["Gemini 2.0 Flash"] = "gemini/gemini-2.0-flash"
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        providers["Claude Sonnet"] = "anthropic/claude-sonnet-4-6"
+    if os.environ.get("GROQ_API_KEY"):
+        providers["Groq Llama-3.3-70B"] = "groq/llama-3.3-70b-versatile"
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        providers["DeepSeek-V3"] = "deepseek/deepseek-chat"
+    if include_openai and os.environ.get("OPENAI_API_KEY"):
+        providers["GPT-4o"] = "openai/gpt-4o"
     return providers
 
 
@@ -163,33 +318,23 @@ def build_ragas_evaluator(
         (eval_llm, eval_embeddings) — eval_embeddings may be None; in that case
         the caller should run Faithfulness only.
     """
-    from core.config import settings
-
     # Suppress RAGAS deprecation warnings for LangchainLLMWrapper (still functional)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         from ragas.llms import LangchainLLMWrapper
         from ragas.embeddings import LangchainEmbeddingsWrapper
 
+    from langchain_litellm import ChatLiteLLM
+
     # --- Evaluator LLM ---
     lc_llm = None
-    if prefer_provider == "anthropic" and settings.ANTHROPIC_API_KEY:
-        from langchain_anthropic import ChatAnthropic
+    if prefer_provider == "anthropic" and os.environ.get("ANTHROPIC_API_KEY"):
         # Use Haiku for evaluation — fast and cheap; quality sufficient for RAGAS scoring
-        lc_llm = ChatAnthropic(
-            model="claude-haiku-4-5-20251001",
-            temperature=0.0,
-            api_key=settings.ANTHROPIC_API_KEY,
-        )
+        lc_llm = ChatLiteLLM(model="anthropic/claude-haiku-4-5-20251001", temperature=0.0)
         print("  Evaluator LLM  : Claude Haiku 4.5 (Anthropic)")
-    elif settings.GOOGLE_API_KEY:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        lc_llm = ChatGoogleGenerativeAI(
-            model=settings.GEMINI_PRIMARY_MODEL,
-            temperature=0.0,
-            google_api_key=settings.GOOGLE_API_KEY,
-        )
-        print(f"  Evaluator LLM  : Gemini {settings.GEMINI_PRIMARY_MODEL}")
+    elif os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY"):
+        lc_llm = ChatLiteLLM(model="gemini/gemini-2.0-flash", temperature=0.0)
+        print("  Evaluator LLM  : Gemini 2.0 Flash (Google)")
     else:
         raise ValueError(
             "No evaluator LLM available. Set ANTHROPIC_API_KEY or GOOGLE_API_KEY."
@@ -202,12 +347,11 @@ def build_ragas_evaluator(
     # --- Evaluator embeddings ---
     eval_embeddings = None
     for _import_path, _label in [
-        ("langchain_huggingface.HuggingFaceEmbeddings",         "HuggingFace (langchain-huggingface)"),
-        ("langchain_community.embeddings.HuggingFaceEmbeddings", "HuggingFace (community)"),
+        ("langchain_huggingface.HuggingFaceEmbeddings",          "HuggingFace (langchain-huggingface)"),
+        ("langchain_community.embeddings.HuggingFaceEmbeddings",  "HuggingFace (community)"),
     ]:
         try:
             module_path, cls_name = _import_path.rsplit(".", 1)
-            import importlib
             mod = importlib.import_module(module_path)
             HFEmbeddings = getattr(mod, cls_name)
             lc_emb = HFEmbeddings(model_name="all-MiniLM-L6-v2")
@@ -274,8 +418,8 @@ def run_ragas_benchmark(
         try:
             scores = evaluate(dataset, metrics=active_metrics)
             df = scores.to_pandas()
-            faith_col  = next((c for c in df.columns if "faithfulness" in c.lower()), None)
-            relev_col  = next((c for c in df.columns if "relevancy" in c.lower() or "relevance" in c.lower()), None)
+            faith_col = next((c for c in df.columns if "faithfulness" in c.lower()), None)
+            relev_col = next((c for c in df.columns if "relevancy" in c.lower() or "relevance" in c.lower()), None)
             results.append({
                 "provider":           label,
                 "n_cards":            len(qa_pairs),

@@ -6,6 +6,7 @@ All values can be overridden via environment variables or a `.env` file.
 """
 
 import os
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
@@ -14,6 +15,7 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     GROQ_API_KEY: str = ""
     GOOGLE_API_KEY: str = ""            # Google AI Studio (Gemini)
+    DEEPSEEK_API_KEY: str = ""          # DeepSeek (OpenAI-compatible API)
     LANGCHAIN_API_KEY: str = ""
     
     # LangSmith Tracing
@@ -21,11 +23,13 @@ class Settings(BaseSettings):
     LANGCHAIN_PROJECT: str = "nexus_learner_mvp"
     
     # Models Config
-    DEFAULT_LLM_PROVIDER: str = "openai"  # "openai" | "anthropic" | "groq" | "google"
+    DEFAULT_LLM_PROVIDER: str = "openai"  # "openai" | "anthropic" | "groq" | "google" | "deepseek"
     PRIMARY_MODEL: str = "gpt-4o"
     ROUTING_MODEL: str = "gpt-4o-mini"
     GEMINI_PRIMARY_MODEL: str = "gemini-2.0-flash"     # 1500 RPD free tier; swap to gemini-2.5-flash for quality (25 RPD only)
     GEMINI_ROUTING_MODEL: str = "gemini-2.0-flash"     # same; 2.5-flash has 25 RPD — too low for routing volume
+    DEEPSEEK_PRIMARY_MODEL: str = "deepseek-chat"      # DeepSeek-V3; use deepseek-reasoner for complex multi-step tasks
+    DEEPSEEK_ROUTING_MODEL: str = "deepseek-chat"      # same model handles routing well at low cost
     
     # Database
     DB_URL: str = "sqlite:///./nexus.db"
@@ -35,6 +39,19 @@ class Settings(BaseSettings):
     QDRANT_API_KEY: str = ""
     QDRANT_COLLECTION_NAME: str = "nexus_chunks"
     
+    # Semantic Cache (Qdrant-backed, local sentence-transformers embeddings)
+    SEMANTIC_CACHE_ENABLED: bool = True
+    SEMANTIC_CACHE_COLLECTION: str = "nexus_semantic_cache"
+    SEMANTIC_CACHE_THRESHOLD: float = 0.92      # cosine similarity floor for a cache hit
+    SEMANTIC_CACHE_TTL_SECONDS: int = 86400     # 0 = no TTL; default 24h
+    SEMANTIC_CACHE_MAX_ENTRIES: int = 10000     # soft cap; oldest entries evicted beyond this
+    # Schemas excluded from caching (non-deterministic agents — temperature > 0)
+    # Default: FlashcardOutput (SocraticAgent uses temp=0.3)
+    SEMANTIC_CACHE_EXCLUDE_SCHEMAS: list[str] = Field(
+        default=["FlashcardOutput"],
+        description="Schema __name__ values never stored in or served from cache",
+    )
+
     # Application State
     AUTO_ACCEPT_CONTENT: bool = False  # If True, bypasses Mentor Review flag
 

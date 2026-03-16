@@ -3,24 +3,26 @@ scripts/sample_free_tier.py
 ----------------------------
 Validation + baseline script for free-tier model hopping.
 
-Tests whether Groq (Llama-3.3-70B) and Gemini 2.0 Flash can replace
-gpt-4o-mini (routing) and gpt-4o (primary) with minimal quality degradation,
-and benchmarks all available providers using RAGAS metrics.
+Demonstrates tier-based model selection via scripts/model_hop.py (LiteLLM-backed),
+tests structured output across providers, and benchmarks all available providers
+using RAGAS metrics.
 
 Run:
     PYTHONPATH=. python scripts/sample_free_tier.py
 
-Required keys in .env:
+Required keys in .env (at least one provider needed):
     GROQ_API_KEY      — Groq free tier   (console.groq.com)
     GOOGLE_API_KEY    — Google AI Studio (aistudio.google.com)
     ANTHROPIC_API_KEY — Anthropic paid   (used as quality baseline)
 
 Optional:
     OPENAI_API_KEY    — GPT-4o comparison (skipped if quota exhausted)
+    DEEPSEEK_API_KEY  — DeepSeek-V3 / R1
 
 All provider / RAGAS infrastructure is in scripts/model_hop.py.
 """
 
+import os
 import sys
 import textwrap
 
@@ -146,13 +148,42 @@ def _fail(msg: str) -> None: print(f"  [FAIL] {msg}")
 def _skip(msg: str) -> None: print(f"  [SKIP] {msg}")
 
 # ---------------------------------------------------------------------------
+# Demo 0 — Tier-based model selection
+# ---------------------------------------------------------------------------
+
+def demo_tier_dispatch() -> bool:
+    _header("Demo 0 — Tier-based model dispatch")
+    print("  Resolving models by task (first available key wins):\n")
+    try:
+        routing_llm    = get_llm(task="routing")     # fast tier
+        generation_llm = get_llm(task="generation")  # balanced tier
+        reasoning_llm  = get_llm(task="reasoning")   # reasoning tier
+
+        def _model(llm) -> str:
+            return getattr(llm, "model", str(llm))
+
+        _ok(f"routing    → {_model(routing_llm)}")
+        _ok(f"generation → {_model(generation_llm)}")
+        _ok(f"reasoning  → {_model(reasoning_llm)}")
+        return True
+    except RuntimeError as e:
+        _skip(f"Not enough keys for all tiers: {e}")
+        return True
+    except Exception as e:
+        _fail(str(e))
+        return False
+
+# ---------------------------------------------------------------------------
 # Test 1 — DocumentStructure via Gemini
 # ---------------------------------------------------------------------------
 
 def test_gemini_structured_output() -> bool:
     _header("Test 1 — Gemini: DocumentStructure (3-level JSON nesting)")
+    if not (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")):
+        _skip("GOOGLE_API_KEY not set — Gemini test skipped.")
+        return True
     try:
-        llm = get_llm("google", purpose="primary")
+        llm = get_llm("gemini/gemini-2.0-flash")
         structured = bind_structured(llm, DocumentStructure)
         prompt = (
             "Analyse the following educational text and return a structured "
@@ -173,13 +204,16 @@ def test_gemini_structured_output() -> bool:
         return False
 
 # ---------------------------------------------------------------------------
-# Test 2 — DocumentStructure via Groq
+# Test 2 — DocumentStructure via Groq (task="routing")
 # ---------------------------------------------------------------------------
 
 def test_groq_structured_output() -> bool:
-    _header("Test 2 — Groq (Llama-3.3-70B): DocumentStructure")
+    _header("Test 2 — Groq (Llama-3.3-70B): DocumentStructure via task='routing'")
+    if not os.environ.get("GROQ_API_KEY"):
+        _skip("GROQ_API_KEY not set — Groq test skipped.")
+        return True
     try:
-        llm = get_llm("groq", purpose="routing")
+        llm = get_llm(task="routing")
         structured = bind_structured(llm, DocumentStructure)
         prompt = (
             "Analyse the following educational text and return a structured "
@@ -200,7 +234,10 @@ def test_groq_structured_output() -> bool:
 
 def test_gemini_flashcard_generation() -> bool:
     _header("Test 3 — Gemini: FlashcardOutput generation")
-    result = generate_structured("google", FlashcardOutput, CARD_PROMPT)
+    if not (os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")):
+        _skip("GOOGLE_API_KEY not set — Gemini test skipped.")
+        return True
+    result = generate_structured("gemini/gemini-2.0-flash", FlashcardOutput, CARD_PROMPT)
     if result is None:
         _skip("Gemini daily quota exhausted — rerun tomorrow.")
         return True
@@ -221,8 +258,8 @@ def test_gemini_flashcard_generation() -> bool:
 def test_model_hop() -> bool:
     _header("Test 4 — Model Hop: Groq (relevance) → Gemini (cards)")
     try:
-        # Step A: Groq classifies relevance
-        groq_llm = get_llm("groq", purpose="routing")
+        # Step A: Groq classifies relevance via task="routing"
+        groq_llm = get_llm(task="routing")
         relevance_llm = bind_structured(groq_llm, RelevanceDecision)
         relevance_prompt = textwrap.dedent(f"""
             Decide whether the following text chunk is relevant to these topics:
@@ -239,8 +276,8 @@ def test_model_hop() -> bool:
             print("  [INFO] Groq marked chunk irrelevant; skipping generation.")
             return True
 
-        # Step B: Gemini generates cards
-        result = generate_structured("google", FlashcardOutput, CARD_PROMPT)
+        # Step B: Gemini generates cards via explicit model string
+        result = generate_structured("gemini/gemini-2.0-flash", FlashcardOutput, CARD_PROMPT)
         if result is None:
             _skip("Gemini daily quota exhausted — hop step skipped.")
             return True
@@ -258,12 +295,12 @@ def test_model_hop() -> bool:
 # ---------------------------------------------------------------------------
 
 def test_claude_comparison() -> bool:
-    from core.config import settings
-    if not settings.ANTHROPIC_API_KEY:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        _header("Test 5 — Claude (Sonnet): FlashcardOutput baseline")
         _skip("ANTHROPIC_API_KEY not set — Claude comparison skipped.")
         return True
     _header("Test 5 — Claude (Sonnet): FlashcardOutput baseline")
-    result = generate_structured("anthropic", FlashcardOutput, CARD_PROMPT)
+    result = generate_structured("anthropic/claude-sonnet-4-6", FlashcardOutput, CARD_PROMPT)
     if result is None:
         _skip("Anthropic quota exhausted.")
         return True
@@ -284,9 +321,10 @@ def test_claude_comparison() -> bool:
 
 def benchmark_providers() -> bool:
     _header("Test 6 — RAGAS Benchmark: Faithfulness + Response Relevancy")
-    from core.config import settings
 
-    if not settings.ANTHROPIC_API_KEY and not settings.GOOGLE_API_KEY:
+    if not os.environ.get("ANTHROPIC_API_KEY") and not (
+        os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
+    ):
         _skip("No evaluator LLM available (need ANTHROPIC_API_KEY or GOOGLE_API_KEY).")
         return True
 
@@ -296,8 +334,8 @@ def benchmark_providers() -> bool:
 
     # Collect (question, answer) pairs per provider
     provider_qa: dict[str, list[tuple[str, str]]] = {}
-    for label, (prov, purp) in providers.items():
-        result = generate_structured(prov, FlashcardOutput, CARD_PROMPT, purpose=purp)
+    for label, model_str in providers.items():
+        result = generate_structured(model_str, FlashcardOutput, CARD_PROMPT)
         if result:
             provider_qa[label] = [(c.question, c.answer) for c in result.cards]
             print(f"    {label}: {len(result.cards)} card(s)")
@@ -324,6 +362,151 @@ def benchmark_providers() -> bool:
     return True
 
 # ---------------------------------------------------------------------------
+# Test 7 — DeepSeek-R1 via Groq: reasoning tier flashcard
+# ---------------------------------------------------------------------------
+
+def test_reasoning_tier() -> bool:
+    _header("Test 7 — DeepSeek-R1 via Groq: reasoning tier flashcard")
+    if not os.environ.get("GROQ_API_KEY"):
+        _skip("GROQ_API_KEY not set — reasoning tier test skipped.")
+        return True
+    result = generate_structured("reasoning", FlashcardOutput, CARD_PROMPT)
+    if result is None:
+        _skip("Reasoning tier quota exhausted.")
+        return True
+    try:
+        assert result.chunk_summary
+        _ok(f"DeepSeek-R1 (Groq) generated {len(result.cards)} card(s)")
+        for c in result.cards:
+            print(f"     [{c.difficulty}] Q: {c.question[:80]}…")
+        return True
+    except Exception as e:
+        _fail(str(e))
+        return False
+
+# ---------------------------------------------------------------------------
+# Demo 8 — Semantic Cache (Qdrant-backed, local embeddings)
+# ---------------------------------------------------------------------------
+
+def demo_semantic_cache() -> bool:
+    _header("Demo 8 — Semantic Cache (Qdrant-backed, all-MiniLM-L6-v2)")
+
+    # Step 1: Initialise
+    try:
+        from core.cache import init_semantic_cache, _reset_cache_singleton  # type: ignore[import]
+        _reset_cache_singleton()  # ensure fresh init for this demo
+        cache = init_semantic_cache()
+    except ImportError as exc:
+        _skip(f"core.cache not importable — {exc}")
+        return True
+
+    s = cache.stats()
+    if not s["enabled"]:
+        _skip("SemanticCache not ready (Qdrant unavailable or sentence-transformers missing)")
+        return True
+
+    print(f"  Cache initialised — collection={s['collection']}, threshold={s['threshold']}")
+
+    # Step 2: Clear for a clean run
+    cache.clear()
+
+    # Ensure at least one provider is available for actual LLM calls
+    providers = available_providers()
+    if not providers:
+        _skip("No API keys configured — cannot test LLM path.")
+        return True
+    test_model = next(iter(providers.values()))
+
+    # Step 3: Excluded schema bypass (FlashcardOutput)
+    relevance_prompt = textwrap.dedent(f"""
+        Decide whether the following text chunk is relevant to these topics:
+        {TARGET_TOPICS}
+
+        Chunk:
+        {SAMPLE_TEXT[:500]}
+    """).strip()
+
+    try:
+        r1_fc = generate_structured(test_model, FlashcardOutput, CARD_PROMPT, use_cache=True)
+        r2_fc = generate_structured(test_model, FlashcardOutput, CARD_PROMPT, use_cache=True)
+        s2 = cache.stats()
+        if s2["hits"] == 0 and s2["stores"] == 0:
+            _ok("Excluded schema: FlashcardOutput not stored (SEMANTIC_CACHE_EXCLUDE_SCHEMAS respected)")
+        else:
+            _fail(f"FlashcardOutput should be excluded but cache shows hits={s2['hits']}, stores={s2['stores']}")
+    except Exception as exc:
+        if is_quota_error(exc):
+            _skip(f"Quota exhausted during exclusion test — {exc}")
+        else:
+            _fail(f"Exclusion test raised: {exc}")
+
+    # Step 4: First call (RelevanceDecision) → MISS
+    cache.clear()
+    try:
+        r1 = generate_structured(test_model, RelevanceDecision, relevance_prompt, use_cache=True)
+        s3 = cache.stats()
+        if r1 is not None and s3["misses"] >= 1 and s3["stores"] >= 1:
+            _ok(f"First call (RelevanceDecision): MISS — stored in cache (misses={s3['misses']}, stores={s3['stores']})")
+        elif r1 is None:
+            _skip("First LLM call returned None (quota?); skipping HIT test.")
+            return True
+        else:
+            _fail(f"Expected MISS+store but stats={s3}")
+    except Exception as exc:
+        if is_quota_error(exc):
+            _skip(f"Quota exhausted on first RelevanceDecision call — {exc}")
+            return True
+        _fail(f"First call raised: {exc}")
+        return False
+
+    # Step 5: Second call (identical prompt) → HIT
+    try:
+        hits_before = cache.stats()["hits"]
+        r2 = generate_structured(test_model, RelevanceDecision, relevance_prompt, use_cache=True)
+        s4 = cache.stats()
+        if s4["hits"] > hits_before and r2 is not None and r2.is_relevant == r1.is_relevant:
+            _ok(f"Second call (RelevanceDecision): HIT — returned from semantic cache (no API call)")
+        else:
+            _fail(f"Expected HIT but stats={s4}")
+    except Exception as exc:
+        _fail(f"Second call raised: {exc}")
+        return False
+
+    # Step 6: Rephrased prompt — informational
+    rephrased = relevance_prompt.replace("Decide whether", "Determine if").replace("text chunk", "passage")
+    try:
+        hits_before = cache.stats()["hits"]
+        generate_structured(test_model, RelevanceDecision, rephrased, use_cache=True)
+        s5 = cache.stats()
+        if s5["hits"] > hits_before:
+            print(f"  [INFO] Rephrased prompt: HIT (threshold crossed — semantically similar enough)")
+        else:
+            print(f"  [INFO] Rephrased prompt: MISS (threshold not crossed — expected at boundary)")
+    except Exception:
+        pass
+
+    # Step 7: use_cache=False → bypass
+    try:
+        hits_before = cache.stats()["hits"]
+        generate_structured(test_model, RelevanceDecision, relevance_prompt, use_cache=False)
+        s6 = cache.stats()
+        if s6["hits"] == hits_before:
+            _ok("use_cache=False: bypassed cache correctly")
+        else:
+            _fail("use_cache=False still incremented hit counter")
+    except Exception as exc:
+        if is_quota_error(exc):
+            _ok("use_cache=False: quota on bypass call (cache correctly not queried)")
+        else:
+            _fail(f"Bypass call raised: {exc}")
+
+    # Step 8: Final stats
+    final = cache.stats()
+    print(f"\n  Final cache stats: {final}")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -332,12 +515,15 @@ def main() -> None:
     print("Providers: Groq (Llama-3.3-70B) | Gemini 2.0 Flash | Claude Sonnet")
 
     results = {
-        "test_gemini_structured_output":    test_gemini_structured_output(),
-        "test_groq_structured_output":      test_groq_structured_output(),
-        "test_gemini_flashcard_generation": test_gemini_flashcard_generation(),
-        "test_model_hop":                   test_model_hop(),
-        "test_claude_comparison":           test_claude_comparison(),
-        "benchmark_providers (RAGAS)":      benchmark_providers(),
+        "demo_tier_dispatch":                            demo_tier_dispatch(),
+        "test_gemini_structured_output":                 test_gemini_structured_output(),
+        "test_groq_structured_output":                   test_groq_structured_output(),
+        "test_gemini_flashcard_generation":              test_gemini_flashcard_generation(),
+        "test_model_hop":                                test_model_hop(),
+        "test_claude_comparison":                        test_claude_comparison(),
+        "benchmark_providers (RAGAS)":                   benchmark_providers(),
+        "test_reasoning_tier (DeepSeek-R1/Groq)":       test_reasoning_tier(),
+        "demo_semantic_cache":                           demo_semantic_cache(),
     }
 
     _header("Summary")

@@ -77,13 +77,21 @@ class FlashcardRepo:
             fc = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
             return _fc_to_dict(fc) if fc else None
 
-    def update_status(self, flashcard_id: int, status: str, feedback: str = "") -> None:
+    def update_status(
+        self,
+        flashcard_id: int,
+        status: str,
+        feedback: str = "",
+        complexity_level: Optional[str] = None,
+    ) -> None:
         with SessionLocal() as db:
             fc = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
             if fc:
                 fc.status = status
                 if feedback:
                     fc.mentor_feedback = feedback
+                if complexity_level is not None:
+                    fc.complexity_level = complexity_level
                 db.commit()
 
     def update_complexity(self, flashcard_id: int, complexity_level: Optional[str]) -> None:
@@ -135,6 +143,26 @@ class FlashcardRepo:
                 Flashcard.status.in_(["approved", "pending"]),
             ).count()
             return count > 0
+
+    def get_pending_ids_for_subtopics(self, subtopic_ids: List[int]) -> List[int]:
+        """Return IDs of all pending flashcards for the given subtopics."""
+        if not subtopic_ids:
+            return []
+        with SessionLocal() as db:
+            rows = db.query(Flashcard.id).filter(
+                Flashcard.subtopic_id.in_(subtopic_ids),
+                Flashcard.status == "pending",
+            ).all()
+            return [r[0] for r in rows]
+
+    def delete_by_subject(self, subject_id: int) -> int:
+        """Delete all flashcards for a subject. Returns count deleted."""
+        with SessionLocal() as db:
+            count = db.query(Flashcard).filter(
+                Flashcard.subject_id == subject_id
+            ).delete(synchronize_session=False)
+            db.commit()
+            return count
 
     def delete(self, flashcard_id: int) -> None:
         with SessionLocal() as db:

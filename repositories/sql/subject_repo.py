@@ -75,3 +75,15 @@ class SubjectRepo:
                 "pending": rows[1] or 0,
                 "rejected": rows[2] or 0,
             }
+
+    def get_all_archived(self) -> List[dict]:
+        with SessionLocal() as db:
+            subjects = db.query(Subject).filter(Subject.is_archived == True).all()
+            return [_subject_to_dict(s) for s in subjects]
+
+    def rename(self, subject_id: int, name: str) -> None:
+        with SessionLocal() as db:
+            subj = db.query(Subject).filter(Subject.id == subject_id).first()
+            if subj:
+                subj.name = name
+                db.commit()

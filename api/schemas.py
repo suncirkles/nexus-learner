@@ -113,3 +113,48 @@ class DocumentResponse(BaseModel):
 class ResetResponse(BaseModel):
     status: str
     message: str
+
+
+# ---------------------------------------------------------------------------
+# New schemas for Phase 2b UI refactoring
+# ---------------------------------------------------------------------------
+
+class SubjectRenameRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class GlobalStatsResponse(BaseModel):
+    total: int
+    approved: int
+    pending: int
+    rejected: int
+
+
+class SubtopicResponse(BaseModel):
+    id: int
+    topic_id: int
+    name: str
+    summary: Optional[str]
+    approved_count: int = 0
+    pending_count: int = 0
+
+    model_config = {"from_attributes": True}
+
+
+class TopicWithSubtopicsResponse(BaseModel):
+    id: int
+    document_id: str
+    name: str
+    summary: Optional[str]
+    subtopics: List["SubtopicResponse"] = []
+
+    model_config = {"from_attributes": True}
+
+
+class FlashcardSourceResponse(BaseModel):
+    source_type: Optional[str]
+    source_url: Optional[str]
+    filename: Optional[str]
+    document_id: Optional[str]
+    page_number: Optional[int]
+    text: Optional[str]

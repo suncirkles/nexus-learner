@@ -59,8 +59,9 @@ def get_vector_store() -> QdrantStore:
 def get_subject_service(
     subject_repo: SubjectRepo = Depends(get_subject_repo),
     flashcard_repo: FlashcardRepo = Depends(get_flashcard_repo),
+    document_repo: DocumentRepo = Depends(get_document_repo),
 ) -> SubjectService:
-    return SubjectService(subject_repo, flashcard_repo)
+    return SubjectService(subject_repo, flashcard_repo, document_repo)
 
 
 def get_flashcard_service(

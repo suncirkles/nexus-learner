@@ -211,3 +211,29 @@ class FlashcardRepo:
             pending  = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "pending").scalar() or 0
             rejected = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "rejected").scalar() or 0
         return {"total": total, "approved": approved, "pending": pending, "rejected": rejected}
+
+    def get_by_subtopic(self, subtopic_id: int, status: Optional[str] = None) -> List[dict]:
+        with SessionLocal() as db:
+            q = db.query(Flashcard).filter(Flashcard.subtopic_id == subtopic_id)
+            if status is not None:
+                q = q.filter(Flashcard.status == status)
+            return [_fc_to_dict(fc) for fc in q.all()]
+
+    def get_source_by_chunk(self, chunk_id: int) -> Optional[dict]:
+        """Return source attribution info for a content chunk."""
+        from core.database import ContentChunk, Document as DBDocument
+        with SessionLocal() as db:
+            chunk = db.query(ContentChunk).filter(ContentChunk.id == chunk_id).first()
+            if not chunk:
+                return None
+            doc = None
+            if chunk.document_id:
+                doc = db.query(DBDocument).filter(DBDocument.id == chunk.document_id).first()
+            return {
+                "source_type": chunk.source_type,
+                "source_url": getattr(chunk, "source_url", None),
+                "filename": doc.filename if doc else None,
+                "document_id": chunk.document_id,
+                "page_number": getattr(chunk, "page_number", None),
+                "text": chunk.text,
+            }

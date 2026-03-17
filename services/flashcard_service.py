@@ -64,3 +64,15 @@ class FlashcardService:
         self, subject_id: int, subtopic_id: int
     ) -> bool:
         return self._flashcards.has_active_cards_for_subtopic(subject_id, subtopic_id)
+
+    def get_by_subtopic(self, subtopic_id: int, status: Optional[str] = None) -> List[dict]:
+        return self._flashcards.get_by_subtopic(subtopic_id, status)
+
+    def delete_one(self, flashcard_id: int) -> None:
+        self._flashcards.delete(flashcard_id)
+
+    def get_all_rejected(self) -> List[dict]:
+        return self._flashcards.get_all_by_status("rejected")
+
+    def get_chunk_source(self, chunk_id: int) -> Optional[dict]:
+        return self._flashcards.get_source_by_chunk(chunk_id)

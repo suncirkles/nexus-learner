@@ -14,6 +14,8 @@ from agents.critic import CriticAgent
 from agents.topic_assigner import TopicAssignerAgent
 from agents.topic_matcher import TopicMatcherAgent
 from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, Document as DBDocument, SubjectDocumentAssociation
+from repositories.sql.flashcard_repo import FlashcardRepo
+from core.config import settings
 import logging
 import os
 import uuid as _uuid
@@ -387,24 +389,45 @@ def _flush_qdrant_batch(pending_docs: List[Dict[str, Any]]):
         raise
 
 def node_generate(state: GraphState):
-    """[GENERATION ONLY] Subject-specific cards."""
+    """[GENERATION ONLY] Subject-specific cards.
+
+    Phase 2b: SocraticAgent.generate_flashcard() now returns FlashcardDraft objects
+    with no DB side-effects. This node persists them via FlashcardRepo.create().
+    AUTO_ACCEPT_CONTENT is read here (not inside the agent) so the agent has zero
+    settings dependency.
+    """
     idx = state["current_chunk_index"]
     chunk_data = state["chunks"][idx]
     subject_id = state["subject_id"]
+    question_type = state.get("question_type", "active_recall")
+    initial_status = "approved" if settings.AUTO_ACCEPT_CONTENT else "pending"
 
-    from langchain_core.documents import Document as LCDoc
-    chunk_doc = LCDoc(page_content=chunk_data["text"], metadata={"db_chunk_id": chunk_data["id"]})
-
-    result = _socratic().generate_flashcard(
-        state["doc_id"], chunk_doc,
-        subtopic_id=chunk_data["subtopic_id"],
-        subject_id=subject_id,
-        question_type=state.get("question_type", "active_recall"),
+    drafts = _socratic().generate_flashcard(
+        source_text=chunk_data["text"],
+        question_type=question_type,
     )
 
     new_cards = []
-    if result.get("status") == "success":
-        new_cards = result.get("flashcards", [])
+    if drafts:
+        fc_repo = FlashcardRepo()
+        for draft in drafts:
+            saved = fc_repo.create(
+                subject_id=subject_id,
+                subtopic_id=chunk_data.get("subtopic_id"),
+                chunk_id=chunk_data["id"],
+                question=draft.question,
+                answer=draft.answer,
+                question_type=draft.question_type,
+                rubric_json=draft.rubric_json,
+                status=initial_status,
+            )
+            new_cards.append({
+                "flashcard_id": saved["id"],
+                "question": saved["question"],
+                "answer": saved["answer"],
+                "question_type": saved["question_type"],
+                "suggested_complexity": draft.suggested_complexity,
+            })
 
     return {
         "generated_flashcards": state.get("generated_flashcards", []) + new_cards,
@@ -414,21 +437,43 @@ def node_generate(state: GraphState):
 
 
 def node_critic(state: GraphState):
-    """[GENERATION ONLY] Evaluates ALL cards produced by the current chunk."""
+    """[GENERATION ONLY] Evaluates ALL cards produced by the current chunk.
+
+    Phase 2b: CriticAgent.evaluate_flashcard() is now pure LLM I/O — it returns a
+    CriticResult dataclass with no DB side-effects. This node writes the scores back
+    via FlashcardRepo so the agent has zero DB knowledge.
+    """
     new_cards = state.get("current_new_cards", [])
     if not new_cards:
         return {"status_message": "No cards to verify."}
 
     source_text = state["chunks"][state["current_chunk_index"]]["text"]
+    fc_repo = FlashcardRepo()
+
     for card in new_cards:
         fc_id = card.get("flashcard_id")
-        if fc_id:
-            _critic().evaluate_flashcard(
-                flashcard_id=fc_id,
-                source_text=source_text,
-                question=card["question"],
-                answer=card["answer"],
-            )
+        if not fc_id:
+            continue
+        result = _critic().evaluate_flashcard(
+            source_text=source_text,
+            question=card["question"],
+            answer=card["answer"],
+            flashcard_id=fc_id,
+        )
+        if result.error:
+            logger.warning("Critic failed for flashcard %d: %s", fc_id, result.error)
+            continue
+        fc_repo.update_critic_scores(
+            flashcard_id=fc_id,
+            aggregate_score=result.aggregate_score,
+            rubric_scores_json=result.rubric_scores_json,
+            feedback=result.feedback,
+            complexity_level=result.suggested_complexity,
+        )
+        if result.should_reject:
+            fc_repo.update_status(fc_id, "rejected")
+            logger.info("Flashcard %d auto-rejected (%s).", fc_id, result.reject_reason)
+
     return {"status_message": "Verification complete.", "current_new_cards": []}
 
 

@@ -188,15 +188,13 @@ def test_subtopic_aggregation_truncates_at_max():
 # ---------------------------------------------------------------------------
 
 def test_generate_flashcard_passes_context():
-    """chain.invoke receives both 'text' and 'context' keys."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from core.database import Base
-    from agents.socratic import SocraticAgent, FlashcardOutput, FlashcardItem, RubricItem
+    """chain.invoke receives the 'text' key resolved from chunk.text (Phase 2b).
 
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-    Base.metadata.create_all(bind=engine)
-    Session = sessionmaker(bind=engine)
+    Phase 2b: generate_flashcard() is now pure (no DB writes). source_text is
+    resolved from the legacy `chunk` arg when source_text is empty. The chain
+    receives {"text": <chunk.text>} directly.
+    """
+    from agents.socratic import SocraticAgent, FlashcardOutput, FlashcardItem, RubricItem
 
     fake_result = FlashcardOutput(flashcards=[
         FlashcardItem(
@@ -218,26 +216,23 @@ def test_generate_flashcard_passes_context():
     agent._chains = {"active_recall": mock_chain}
     agent.llm = MagicMock()
 
-    chunk = MagicMock()
+    chunk = MagicMock(spec=["text", "id"])  # has .text but not .page_content
     chunk.text = "Bayes' Theorem: P(A|B) = P(B|A)P(A)/P(B)."
     chunk.id = 99
-    del chunk.page_content  # ensure ORM path is taken
 
-    with patch("agents.socratic.SessionLocal", Session):
-        agent.generate_flashcard(
-            doc_id=str(uuid.uuid4()),
-            chunk=chunk,
-            subtopic_id=None,
-            subject_id=None,
-            question_type="active_recall",
-            context="Bayes Theorem",
-        )
+    # Phase 2b: no SessionLocal needed — pass source_text="" to trigger chunk fallback
+    result = agent.generate_flashcard(
+        source_text="",
+        chunk=chunk,
+        question_type="active_recall",
+    )
 
     mock_chain.invoke.assert_called_once()
     call_kwargs = mock_chain.invoke.call_args[0][0]
     assert "text" in call_kwargs, "chain.invoke must receive 'text' key"
-    assert "context" in call_kwargs, "chain.invoke must receive 'context' key"
-    assert call_kwargs["context"] == "Bayes Theorem"
+    assert call_kwargs["text"] == chunk.text, "source_text must be resolved from chunk.text"
+    assert isinstance(result, list)
+    assert len(result) == 1
 
 
 # ---------------------------------------------------------------------------

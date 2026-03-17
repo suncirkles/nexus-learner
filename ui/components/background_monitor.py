@@ -8,57 +8,62 @@ Moved verbatim from app.py — zero behaviour change.
 import streamlit as st
 
 
-def render_sidebar_background_monitor():
-    """Sidebar fragment showing active background tasks."""
+@st.fragment(run_every=2)
+def _sidebar_monitor():
+    """Module-level fragment — stable identity lets run_every fire reliably."""
     from core.background import background_tasks, stop_background_task, _lock as _bg_lock
 
-    @st.fragment
-    def _monitor():
-        with _bg_lock:
-            active_tasks = {
-                tid: task
-                for tid, task in background_tasks.items()
-                if task.get("status") in ["processing", "failed"]
-            }
-        if active_tasks:
-            st.divider()
-            st.subheader("⏳ Background Processes")
-            for tid, tinfo in active_tasks.items():
-                st.markdown(f"**{tinfo.get('filename', 'Task')}**")
+    with _bg_lock:
+        active_tasks = {
+            tid: task
+            for tid, task in background_tasks.items()
+            if task.get("status") in ["processing", "failed"]
+        }
+    if not active_tasks:
+        return
 
-                if tinfo["status"] == "failed":
-                    st.error(f"Failed: {tinfo.get('error', 'Unknown Error')}")
-                elif tinfo.get("is_web"):
-                    current = tinfo.get("pages_current", 0)
-                    total = tinfo.get("pages_total", 1)
-                    st.progress(
-                        min(max(current / total if total > 0 else 0, 0.0), 1.0),
-                        text=f"Topics: {current}/{total}",
-                    )
-                else:
-                    tp = tinfo.get("total_pages", 1)
-                    cp = tinfo.get("current_page", 0)
-                    cc = tinfo.get("current_chunk_index", 0)
-                    tc = tinfo.get("chunks_in_page", 1)
-                    chunk_progress = cc / tc if tc > 0 else 0
-                    global_progress = (cp + chunk_progress) / tp if tp > 0 else 0
-                    st.progress(
-                        min(max(global_progress, 0.0), 1.0),
-                        text=f"Page {cp+1}/{tp}: {tinfo.get('status_message', 'Processing...')}",
-                    )
+    st.divider()
+    st.subheader("⏳ Background Processes")
+    for tid, tinfo in active_tasks.items():
+        st.markdown(f"**{tinfo.get('filename', 'Task')}**")
 
-                if st.button("⏹️ Remove/Stop", key=f"stop_task_{tid}"):
-                    stop_background_task(tid)
-                    if tinfo["status"] == "failed":
-                        from core.background import background_tasks as bt
-                        del bt[tid]
-                    st.rerun()
+        if tinfo["status"] == "failed":
+            st.error(f"Failed: {tinfo.get('error', 'Unknown Error')}")
+        elif tinfo.get("is_web"):
+            current = tinfo.get("pages_current", 0)
+            total = tinfo.get("pages_total", 1)
+            st.progress(
+                min(max(current / total if total > 0 else 0, 0.0), 1.0),
+                text=f"Topics: {current}/{total}",
+            )
+        else:
+            tp = tinfo.get("total_pages", 1)
+            cp = tinfo.get("current_page", 0)
+            cc = tinfo.get("current_chunk_index", 0)
+            tc = tinfo.get("chunks_in_page", 1)
+            chunk_progress = cc / tc if tc > 0 else 0
+            global_progress = (cp + chunk_progress) / tp if tp > 0 else 0
+            st.progress(
+                min(max(global_progress, 0.0), 1.0),
+                text=f"Page {cp+1}/{tp}: {tinfo.get('status_message', 'Processing...')}",
+            )
 
-    _monitor()
+        if st.button("⏹️ Remove/Stop", key=f"stop_task_{tid}"):
+            stop_background_task(tid)
+            if tinfo["status"] == "failed":
+                from core.background import background_tasks as bt
+                del bt[tid]
+            st.rerun()
 
 
-def render_study_materials_background_monitor():
-    """Inline background task monitor shown at the bottom of Study Materials page."""
+def render_sidebar_background_monitor():
+    """Sidebar fragment showing active background tasks."""
+    _sidebar_monitor()
+
+
+@st.fragment(run_every=2)
+def _study_materials_monitor():
+    """Module-level fragment — stable identity lets run_every fire reliably."""
     from core.background import background_tasks, stop_background_task, clear_background_task, _lock as _bg_lock
 
     with _bg_lock:
@@ -115,3 +120,8 @@ def render_study_materials_background_monitor():
                 if col_b.button("✖ Clear", key=f"clear_{d_id}"):
                     clear_background_task(d_id)
                     st.rerun()
+
+
+def render_study_materials_background_monitor():
+    """Inline background task monitor shown at the bottom of Study Materials page."""
+    _study_materials_monitor()

@@ -11,61 +11,61 @@ import time
 import logging
 import streamlit as st
 
-from core.database import SessionLocal, Subject, Document as DBDocument, Subtopic, Topic, SubjectDocumentAssociation
-from core.config import settings
+from ui import api_client
 from ui.components.topic_input import render_topic_input_section
 from ui.components.background_monitor import render_study_materials_background_monitor
 
 logger = logging.getLogger(__name__)
 
 
-def _render_upload_tab(db, subject_id: int, subject_name: str):
+def _render_upload_tab(subject_id: int, subject_name: str):
     """Refactored Tab 1: Knowledge Library Attachment and Generation."""
 
     st.markdown("#### 🔗 Attached Library Documents")
-    doc_associations = db.query(SubjectDocumentAssociation).filter(SubjectDocumentAssociation.subject_id == subject_id).all()
-    attached_doc_ids = [a.document_id for a in doc_associations]
-    attached_docs = db.query(DBDocument).filter(DBDocument.id.in_(attached_doc_ids)).all() if attached_doc_ids else []
+    attached_docs = api_client.list_attached_documents(subject_id)
+    attached_doc_ids = [d["id"] for d in attached_docs]
 
     if not attached_docs:
         st.info("No documents attached to this subject yet.")
     else:
         for doc in attached_docs:
             col1, col2 = st.columns([0.8, 0.2])
-            topic_count = db.query(Topic).filter(Topic.document_id == doc.id).count()
-            col1.markdown(f"- **{doc.title or doc.filename}** ({topic_count} topics indexed)")
-            if col2.button("🗑️ Detach", key=f"detach_{subject_id}_{doc.id}"):
-                db.query(SubjectDocumentAssociation).filter(
-                    SubjectDocumentAssociation.subject_id == subject_id,
-                    SubjectDocumentAssociation.document_id == doc.id
-                ).delete()
-                db.commit()
-                st.rerun()
+            topics = api_client.get_topics_by_document(doc["id"])
+            topic_count = len(topics)
+            col1.markdown(f"- **{doc.get('title') or doc.get('filename')}** ({topic_count} topics indexed)")
+            if col2.button("🗑️ Detach", key=f"detach_{subject_id}_{doc['id']}"):
+                try:
+                    api_client.detach_document(subject_id, doc["id"])
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Detach failed: {e}")
 
     st.divider()
 
     st.markdown("#### ➕ Attach from Library")
-    available_docs = db.query(DBDocument).filter(~DBDocument.id.in_(attached_doc_ids)).all() if attached_doc_ids else db.query(DBDocument).all()
+    available_docs = api_client.list_available_documents(subject_id)
 
     if not available_docs:
         st.caption("No new documents available in library. Index them in the '📂 Knowledge Library' tab.")
     else:
-        doc_options = {f"{d.title or d.filename}": d.id for d in available_docs}
+        doc_options = {f"{d.get('title') or d.get('filename')}": d["id"] for d in available_docs}
         selected_doc_name = st.selectbox("Select document to attach:", [""] + list(doc_options.keys()), key=f"lib_attach_{subject_id}")
         if selected_doc_name:
             if st.button("Link to Subject", key=f"btn_link_{subject_id}"):
-                new_assoc = SubjectDocumentAssociation(subject_id=subject_id, document_id=doc_options[selected_doc_name])
-                db.add(new_assoc)
-                db.commit()
-                st.success("Document attached!")
-                st.rerun()
+                try:
+                    api_client.attach_document(subject_id, doc_options[selected_doc_name])
+                    st.success("Document attached!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Attach failed: {e}")
 
     st.divider()
 
     st.markdown("#### 🧠 Generate Flashcards")
 
-    all_subtopics = db.query(Subtopic).join(Topic).filter(Topic.document_id.in_(attached_doc_ids)).all() if attached_doc_ids else []
-    topic_list = list(set([s.topic.name for s in all_subtopics])) if all_subtopics else []
+    # Build topic list from all topics indexed for this subject
+    topics = api_client.get_topics_by_subject(subject_id)
+    topic_list = list({t["name"] for t in topics})
 
     if not topic_list:
         st.warning("Attach a document with indexed topics first.")
@@ -98,13 +98,15 @@ def _render_upload_tab(db, subject_id: int, subject_name: str):
 
             if not final_target_topics:
                 st.warning("Please select or enter at least one topic.")
+            elif not attached_docs:
+                st.warning("No documents attached to this subject.")
             else:
                 from core.background import start_background_task
                 for doc in attached_docs:
                     gen_id = str(uuid.uuid4())
                     state = {
                         "mode": "GENERATION",
-                        "doc_id": doc.id,
+                        "doc_id": doc["id"],
                         "subject_id": subject_id,
                         "target_topics": final_target_topics,
                         "question_type": selected_question_type,
@@ -113,7 +115,7 @@ def _render_upload_tab(db, subject_id: int, subject_name: str):
                         "generated_flashcards": [],
                         "status_message": "Matching topics and identifying chunks...",
                     }
-                    label = doc.title or doc.filename
+                    label = doc.get("title") or doc.get("filename")
                     start_background_task(
                         state, gen_id,
                         filename=f"Gen ({label}): {', '.join(final_target_topics[:2])}...",
@@ -298,75 +300,70 @@ def _run_web_research(subject_id: int, subject_name: str, topics: list):
 
 def render_study_materials():
     st.header("📚 Study Material Ingestion")
-    db = SessionLocal()
-    try:
-        if "ingest_subject_id" not in st.session_state:
-            st.session_state.ingest_subject_id = None
 
-        st.subheader("1. Subject Context")
+    if "ingest_subject_id" not in st.session_state:
+        st.session_state.ingest_subject_id = None
 
-        subjects = db.query(Subject).filter(Subject.is_archived == False).all()
+    st.subheader("1. Subject Context")
 
-        if not subjects:
-            st.info("No subjects found. Please create your first subject below.")
-            subj_mode = "Create New Subject"
-        else:
-            subj_mode = st.radio("What would you like to do?", ["Select Existing Subject", "Create New Subject"], horizontal=True)
+    subjects = api_client.list_active_subjects()
 
-        if subj_mode == "Create New Subject":
-            with st.container(border=True):
-                new_subj_name = st.text_input("New Subject Name (e.g. Machine Learning)")
-                if st.button("✨ Create Subject"):
-                    cleaned_name = new_subj_name.strip() if new_subj_name else ""
-                    if not cleaned_name:
-                        st.warning("Please enter a valid, non-empty name.")
-                    elif len(cleaned_name) > 100:
-                        st.warning("Subject name is too long (maximum 100 characters).")
-                    else:
-                        try:
-                            new_subj = Subject(name=cleaned_name)
-                            db.add(new_subj)
-                            db.commit()
-                            st.session_state.ingest_subject_id = new_subj.id
-                            st.success(f"Subject '{new_subj_name}' created and selected!")
-                            time.sleep(1)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error: {e}")
-        else:
-            subject_names = [s.name for s in subjects]
-            current_idx = 0
-            if st.session_state.ingest_subject_id:
-                for i, s in enumerate(subjects):
-                    if s.id == st.session_state.ingest_subject_id:
-                        current_idx = i
-                        break
+    if not subjects:
+        st.info("No subjects found. Please create your first subject below.")
+        subj_mode = "Create New Subject"
+    else:
+        subj_mode = st.radio("What would you like to do?", ["Select Existing Subject", "Create New Subject"], horizontal=True)
 
-            selected_name = st.selectbox("Choose Subject", subject_names, index=current_idx)
-            selected_subj = db.query(Subject).filter(Subject.name == selected_name).first()
-            st.session_state.ingest_subject_id = selected_subj.id
+    if subj_mode == "Create New Subject":
+        with st.container(border=True):
+            new_subj_name = st.text_input("New Subject Name (e.g. Machine Learning)")
+            if st.button("✨ Create Subject"):
+                cleaned_name = new_subj_name.strip() if new_subj_name else ""
+                if not cleaned_name:
+                    st.warning("Please enter a valid, non-empty name.")
+                elif len(cleaned_name) > 100:
+                    st.warning("Subject name is too long (maximum 100 characters).")
+                else:
+                    try:
+                        new_subj = api_client.create_subject(cleaned_name)
+                        st.session_state.ingest_subject_id = new_subj["id"]
+                        st.success(f"Subject '{cleaned_name}' created and selected!")
+                        time.sleep(1)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error: {e}")
+    else:
+        subject_names = [s["name"] for s in subjects]
+        current_idx = 0
+        if st.session_state.ingest_subject_id:
+            for i, s in enumerate(subjects):
+                if s["id"] == st.session_state.ingest_subject_id:
+                    current_idx = i
+                    break
+
+        selected_name = st.selectbox("Choose Subject", subject_names, index=current_idx)
+        selected_subj = next((s for s in subjects if s["name"] == selected_name), None)
+        if selected_subj:
+            st.session_state.ingest_subject_id = selected_subj["id"]
             st.info(f"Adding artifacts to: **{selected_name}**")
 
-        st.divider()
+    st.divider()
 
-        if st.session_state.ingest_subject_id:
-            subject_id = st.session_state.ingest_subject_id
-            current_subject = db.get(Subject, subject_id)
-            subject_name = current_subject.name if current_subject else ""
-            st.subheader(f"2. Add Content to '{subject_name}'")
+    if st.session_state.ingest_subject_id:
+        subject_id = st.session_state.ingest_subject_id
+        current_subject = next((s for s in subjects if s["id"] == subject_id), None)
+        subject_name = current_subject["name"] if current_subject else ""
+        st.subheader(f"2. Add Content to '{subject_name}'")
 
-            tab_upload, tab_web = st.tabs(["📄 Upload Document", "🌐 Web Research"])
+        tab_upload, tab_web = st.tabs(["📄 Upload Document", "🌐 Web Research"])
 
-            with tab_upload:
-                _render_upload_tab(db, subject_id, subject_name)
+        with tab_upload:
+            _render_upload_tab(subject_id, subject_name)
 
-            with tab_web:
-                _render_web_research_tab(subject_id, subject_name)
+        with tab_web:
+            _render_web_research_tab(subject_id, subject_name)
 
-        else:
-            st.warning("Please select or create a subject above before uploading artifacts.")
-
-    finally:
-        db.close()
+    else:
+        st.warning("Please select or create a subject above before uploading artifacts.")
 
     render_study_materials_background_monitor()

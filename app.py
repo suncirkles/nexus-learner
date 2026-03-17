@@ -88,16 +88,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Page imports — each module contains a single render_* function
-from ui.pages.dashboard import render_dashboard
-from ui.pages.library import render_knowledge_library
-from ui.pages.study_materials import render_study_materials
-from ui.pages.mentor import render_mentor_review
-from ui.pages.learner import render_learner_view
-from ui.pages.system_tools import render_system_tools
-from ui.components.background_monitor import render_sidebar_background_monitor
-
-
 def main():
     st.sidebar.title("🎓 Nexus Learner")
 
@@ -118,20 +108,27 @@ def main():
     st.session_state.active_nav = active_nav
 
     with st.sidebar:
+        from ui.components.background_monitor import render_sidebar_background_monitor
         render_sidebar_background_monitor()
 
-    # Dispatch to the appropriate page
+    # Lazy page imports — only load the module the user is actually visiting
     if active_nav == "🏠 Dashboard":
+        from ui.pages.dashboard import render_dashboard
         render_dashboard()
     elif active_nav == "📂 Knowledge Library":
+        from ui.pages.library import render_knowledge_library
         render_knowledge_library()
     elif active_nav == "📚 Study Materials":
+        from ui.pages.study_materials import render_study_materials
         render_study_materials()
     elif active_nav == "👨‍🏫 Mentor Review":
+        from ui.pages.mentor import render_mentor_review
         render_mentor_review()
     elif active_nav == "🧠 Learner":
+        from ui.pages.learner import render_learner_view
         render_learner_view()
     elif active_nav == "⚙️ System Tools":
+        from ui.pages.system_tools import render_system_tools
         render_system_tools()
 
 

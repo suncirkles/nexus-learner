@@ -7,7 +7,22 @@
       "Bash(cd \"D:\\\\projects\\\\Gen-AI\\\\Nexus Learner\" && python -c \"\nfrom duckduckgo_search import DDGS\nddgs = DDGS\\(\\)\ntry:\n    r = ddgs.text\\('binary search tree data structures', max_results=10\\)\n    print\\('Results count:', len\\(r or []\\)\\)\n    for i in r or []:\n        print\\(' -', i.get\\('href', i.get\\('url',''\\)\\)\\)\nexcept Exception as e:\n    print\\('ERROR:', e\\)\n\")",
       "Bash(cd \"D:\\\\projects\\\\Gen-AI\\\\Nexus Learner\" && pip install ddgs 2>&1 | tail -5 && python -c \"\nfrom ddgs import DDGS\nddgs = DDGS\\(\\)\nr = ddgs.text\\('binary search tree tutorial', max_results=10\\)\nprint\\('Results:', len\\(r or []\\)\\)\nfor i in \\(r or []\\)[:3]:\n    print\\(' -', i.get\\('href',''\\)\\)\n\")",
       "Bash(python -c \"\nimport requests\nr = requests.get\\('https://en.wikipedia.org/w/api.php', params={\n    'action':'query','list':'search','srsearch':'binary search tree',\n    'format':'json','srlimit':3\n}, timeout=10, headers={'User-Agent':'NexusLearner/1.0'}\\)\nprint\\('Status:', r.status_code\\)\nprint\\('Content length:', len\\(r.text\\)\\)\nif r.ok:\n    data = r.json\\(\\)\n    for item in data.get\\('query',{}\\).get\\('search',[]\\):\n        print\\('WIKI:', item['title']\\)\n\")",
-      "Bash(cd \"D:\\\\projects\\\\Gen-AI\\\\Nexus Learner\" && python -c \"\nimport sys, io\nsys.stdout = io.TextIOWrapper\\(sys.stdout.buffer, encoding='utf-8'\\)\nfrom agents.web_researcher import WebResearchAgent\nagent = WebResearchAgent\\(\\)\ndef cb\\(msg\\): print\\(msg\\)\ndocs = agent.research_topics\\(\n    topics=['Binary Search Trees'],\n    subject_name='Data Structures',\n    subject_id=999,\n    status_callback=cb,\n\\)\nprint\\(f'RESULT: {len\\(docs\\)} document\\(s\\) found'\\)\nfor d in docs:\n    print\\(f'  [{d.domain}] {d.title} - {len\\(d.content\\)} chars'\\)\n\" 2>&1)"
+      "Bash(cd \"D:\\\\projects\\\\Gen-AI\\\\Nexus Learner\" && python -c \"\nimport sys, io\nsys.stdout = io.TextIOWrapper\\(sys.stdout.buffer, encoding='utf-8'\\)\nfrom agents.web_researcher import WebResearchAgent\nagent = WebResearchAgent\\(\\)\ndef cb\\(msg\\): print\\(msg\\)\ndocs = agent.research_topics\\(\n    topics=['Binary Search Trees'],\n    subject_name='Data Structures',\n    subject_id=999,\n    status_callback=cb,\n\\)\nprint\\(f'RESULT: {len\\(docs\\)} document\\(s\\) found'\\)\nfor d in docs:\n    print\\(f'  [{d.domain}] {d.title} - {len\\(d.content\\)} chars'\\)\n\" 2>&1)",
+      "Bash(ls:*)",
+      "Bash(cd:*)",
+      "Bash(pip show:*)",
+      "Bash(streamlit run:*)",
+      "Bash(python -c \":*)",
+      "Bash(PYTHONPATH=. DEFAULT_LLM_PROVIDER=anthropic python -c \":*)",
+      "Bash(python -c \"import streamlit; print\\(streamlit.__version__\\)\")",
+      "Bash(PYTHONPATH=. pytest tests/ui/test_background_monitor.py -v)",
+      "Bash(rm:*)",
+      "Bash(PYTHONPATH=. python -c \":*)",
+      "Bash(PYTHONPATH=. pytest tests/ui/test_background_monitor.py -v --tb=short)",
+      "Bash(PYTHONPATH=. pytest tests/test_chunking_strategy.py tests/test_critic_rubric.py tests/test_duplicates.py tests/test_socratic_types.py -v --tb=short)",
+      "Bash(PYTHONPATH=. uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload)",
+      "Bash(PYTHONPATH=. uvicorn api.app:app --host 127.0.0.1 --port 8000 --reload)",
+      "Bash(PYTHONPATH=. python -m pytest tests/unit/ -x -q)"
     ]
   }
 }

@@ -44,3 +44,12 @@ class TopicService:
                 doc_id, topic_id, e,
             )
         return preserved
+
+    def get_by_subject(self, subject_id: int) -> List[dict]:
+        return self._topics.get_by_subject(subject_id)
+
+    def get_subtopics(self, topic_id: int) -> List[dict]:
+        return self._topics.get_subtopics_by_topic(topic_id)
+
+    def get_subtopics_with_counts(self, topic_id: int) -> List[dict]:
+        return self._topics.get_subtopics_with_counts(topic_id)

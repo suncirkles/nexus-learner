@@ -9,7 +9,7 @@ Centralises topic/subtopic CRUD and the H6 cascade-delete invariant
 import logging
 from typing import List, Optional
 from sqlalchemy import delete, update as sa_update
-from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk
+from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, SubjectDocumentAssociation
 
 logger = logging.getLogger(__name__)
 
@@ -128,3 +128,34 @@ class TopicRepo:
             db.commit()
 
         return preserved_count
+
+    def get_by_subject(self, subject_id: int) -> List[dict]:
+        """Return all topics for a subject via SubjectDocumentAssociation."""
+        with SessionLocal() as db:
+            topics = (
+                db.query(Topic)
+                .join(SubjectDocumentAssociation, Topic.document_id == SubjectDocumentAssociation.document_id)
+                .filter(SubjectDocumentAssociation.subject_id == subject_id)
+                .order_by(Topic.created_at.desc())
+                .all()
+            )
+            return [_topic_to_dict(t) for t in topics]
+
+    def get_subtopics_with_counts(self, topic_id: int) -> List[dict]:
+        """Return subtopics for a topic with approved and pending card counts."""
+        from sqlalchemy import func, case, Integer
+        with SessionLocal() as db:
+            subs = db.query(Subtopic).filter(Subtopic.topic_id == topic_id).all()
+            result = []
+            for s in subs:
+                approved = db.query(func.count(Flashcard.id)).filter(
+                    Flashcard.subtopic_id == s.id, Flashcard.status == "approved"
+                ).scalar() or 0
+                pending = db.query(func.count(Flashcard.id)).filter(
+                    Flashcard.subtopic_id == s.id, Flashcard.status == "pending"
+                ).scalar() or 0
+                d = _subtopic_to_dict(s)
+                d["approved_count"] = approved
+                d["pending_count"] = pending
+                result.append(d)
+            return result

@@ -32,7 +32,8 @@ from agents.safety import SafetyAgent
 from agents.socratic import SocraticAgent
 from agents.web_researcher import WebResearchAgent
 from core.config import settings
-from core.database import SessionLocal, ContentChunk, Document as DBDocument
+from core.database import SessionLocal, ContentChunk, Document as DBDocument, SubjectDocumentAssociation, Topic, Subtopic
+from repositories.sql.topic_repo import TopicRepo
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +349,13 @@ def node_ingest_web_document(state: GraphState) -> dict:
 # ---------------------------------------------------------------------------
 
 def node_curate(state: GraphState) -> dict:
+    """[Phase 2] Extract topic hierarchy via LLM, then persist via TopicRepo.
+
+    Phase 2b: CuratorAgent.curate_structure() is now pure LLM I/O — no DB writes.
+    This node pre-queries the existing hierarchy as a formatted string, calls the
+    agent, then calls topic_repo.get_or_create() / get_or_create_subtopic() for
+    each topic/subtopic in the LLM result.
+    """
     if not state.get("full_text"):
         # Duplicate was skipped — nothing to curate
         return {}
@@ -357,13 +365,50 @@ def node_curate(state: GraphState) -> dict:
     if cb:
         cb("Extracting topics and subtopics...")
 
+    subject_id = state["subject_id"]
+    doc_id = state["doc_id"]
+
+    # Pre-query existing hierarchy for context (workflow responsibility, Phase 3 moves to repo)
+    existing_structure_text = "No existing topics."
+    db = SessionLocal()
+    try:
+        existing_topics = (
+            db.query(Topic)
+            .join(SubjectDocumentAssociation, Topic.document_id == SubjectDocumentAssociation.document_id)
+            .filter(SubjectDocumentAssociation.subject_id == subject_id)
+            .all()
+        )
+        if existing_topics:
+            lines = []
+            for t in existing_topics:
+                subs = db.query(Subtopic).filter(Subtopic.topic_id == t.id).all()
+                sub_names = ", ".join(s.name for s in subs)
+                lines.append(f"- Topic: {t.name} (Sub-topics: {sub_names})")
+            existing_structure_text = "\n".join(lines)
+    finally:
+        db.close()
+
+    # LLM call — pure, no DB side effects
     result = _get_curator().curate_structure(
-        state["subject_id"], state["doc_id"], state["full_text"]
+        full_text=state["full_text"],
+        existing_structure_text=existing_structure_text,
     )
+
+    # Persist via TopicRepo (get_or_create is idempotent — case-insensitive)
+    topic_repo = TopicRepo()
+    topics_data = []
+    for t in result["hierarchy"]:
+        topic = topic_repo.get_or_create(doc_id, t["name"], t.get("summary", ""))
+        subtopics_list = []
+        for s in t["subtopics"]:
+            sub = topic_repo.get_or_create_subtopic(topic["id"], s["name"], s.get("summary", ""))
+            subtopics_list.append(sub)
+        topics_data.append({**topic, "subtopics": subtopics_list})
+
     return {
-        "hierarchy": result["hierarchy"],
+        "hierarchy": topics_data,
         "doc_summary": result["doc_summary"],
-        "status_message": f"Integrated content into {len(result['hierarchy'])} topics.",
+        "status_message": f"Integrated content into {len(topics_data)} topics.",
     }
 
 

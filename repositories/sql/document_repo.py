@@ -89,3 +89,27 @@ class DocumentRepo:
             if doc:
                 db.delete(doc)
                 db.commit()
+
+    def detach_from_subject(self, doc_id: str, subject_id: int) -> None:
+        with SessionLocal() as db:
+            assoc = db.query(SubjectDocumentAssociation).filter(
+                SubjectDocumentAssociation.subject_id == subject_id,
+                SubjectDocumentAssociation.document_id == doc_id,
+            ).first()
+            if assoc:
+                db.delete(assoc)
+                db.commit()
+
+    def get_not_attached_to_subject(self, subject_id: int) -> List[dict]:
+        """All documents that are NOT currently attached to the given subject."""
+        with SessionLocal() as db:
+            attached_ids = [
+                a.document_id
+                for a in db.query(SubjectDocumentAssociation).filter(
+                    SubjectDocumentAssociation.subject_id == subject_id
+                ).all()
+            ]
+            q = db.query(DBDocument)
+            if attached_ids:
+                q = q.filter(~DBDocument.id.in_(attached_ids))
+            return [_doc_to_dict(d) for d in q.order_by(DBDocument.created_at.desc()).all()]

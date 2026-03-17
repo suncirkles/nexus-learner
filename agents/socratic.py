@@ -2,14 +2,21 @@
 agents/socratic.py
 -------------------
 AI-powered flashcard generator supporting multiple question types.
-Generates high-quality Q&A pairs from text chunks, saves them to the
-database, and supports flashcard recreation based on mentor feedback.
-Also provides LLM-suggested answers for the review workflow.
+Generates high-quality Q&A pairs from text chunks and returns FlashcardDraft
+objects — no DB writes.
+
+Phase 2b change: generate_flashcard() no longer writes to the database.
+It returns a list of FlashcardDraft dataclasses. The calling workflow node
+persists them via flashcard_repo.create().
+
+recreate_flashcard() and suggest_answer() still access the DB directly because
+they are UI-driven (Mentor Review) and will be decoupled in Phase 3.
 """
 
 import json
 import logging
-from typing import List, Dict, Any
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional, Any as AnyType
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from core.models import get_llm
@@ -19,7 +26,7 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Output models
+# Output models (Pydantic — used for LLM structured output)
 # ---------------------------------------------------------------------------
 
 class RubricItem(BaseModel):
@@ -35,6 +42,24 @@ class FlashcardItem(BaseModel):
 
 class FlashcardOutput(BaseModel):
     flashcards: List[FlashcardItem] = Field(description="List of one or more flashcards (1-3).")
+
+
+# ---------------------------------------------------------------------------
+# Pure-data result returned to the workflow node
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FlashcardDraft:
+    """Immutable data transfer object returned by SocraticAgent.generate_flashcard().
+
+    The calling workflow node writes these to the DB via flashcard_repo.create().
+    """
+    question: str
+    answer: str
+    question_type: str
+    rubric_json: str           # json.dumps([{"criterion": ..., "description": ...}, ...])
+    suggested_complexity: str
+
 
 # ---------------------------------------------------------------------------
 # Per-type system prompts
@@ -118,9 +143,9 @@ The answer should explain the outcome or correct action with reference to the so
 # ---------------------------------------------------------------------------
 
 class SocraticAgent:
-    def __init__(self):
-        self.llm = get_llm(purpose="primary", temperature=0.3)
-        # Build one chain per question type; cached at construction time.
+    def __init__(self, llm: AnyType = None):
+        """Accept an optional llm for injection in tests; default to get_llm()."""
+        self.llm = llm if llm is not None else get_llm(purpose="primary", temperature=0.3)
         self._chains: Dict[str, Any] = {}
         for qtype, system_msg in PROMPTS.items():
             prompt = ChatPromptTemplate.from_messages([
@@ -130,7 +155,6 @@ class SocraticAgent:
             self._chains[qtype] = prompt | self.llm.with_structured_output(FlashcardOutput)
 
     def _get_chain(self, question_type: str):
-        """Returns the chain for the given type, falling back to active_recall."""
         if question_type not in self._chains:
             logger.warning("Unknown question_type '%s', falling back to active_recall.", question_type)
             question_type = "active_recall"
@@ -138,74 +162,55 @@ class SocraticAgent:
 
     def generate_flashcard(
         self,
-        doc_id: str,
-        chunk,
-        subtopic_id: int = None,
-        subject_id: int = None,
+        source_text: str,
         question_type: str = "active_recall",
         context: str = "",
-    ) -> dict:
-        """Generates flashcard(s) based on a chunk and stages them to the database.
+        # Legacy positional args kept for backward compatibility during Phase 2b transition
+        doc_id: Optional[str] = None,
+        chunk: Optional[Any] = None,
+        subtopic_id: Optional[int] = None,
+        subject_id: Optional[int] = None,
+    ) -> List[FlashcardDraft]:
+        """Generate flashcard(s) from source_text.
 
-        ``chunk`` may be either a LangChain ``Document`` (has ``page_content`` and
-        ``metadata`` dict) or a SQLAlchemy ``ContentChunk`` ORM object (has ``text``
-        and ``id``).
+        Returns a list of FlashcardDraft objects — no DB writes.
+        The calling workflow node creates DB records via flashcard_repo.create().
+
+        If called with the old (chunk, doc_id) signature, source_text is resolved
+        from the chunk object for backward compatibility.
         """
-        # Resolve source text and chunk_id regardless of chunk type
-        if hasattr(chunk, 'page_content'):  # LangChain Document
-            source_text = chunk.page_content
-            chunk_id = chunk.metadata.get("db_chunk_id") if isinstance(getattr(chunk, 'metadata', None), dict) else None
-        else:  # ORM ContentChunk
-            source_text = chunk.text
-            chunk_id = chunk.id
-
-        if chunk_id is None:
-            logger.warning(
-                "generate_flashcard: chunk_id is None for doc %s — flashcard will lack source traceability",
-                doc_id,
-            )
+        # Resolve source_text when called with legacy chunk argument
+        if chunk is not None and not source_text:
+            if hasattr(chunk, "page_content"):
+                source_text = chunk.page_content
+            elif hasattr(chunk, "text"):
+                source_text = chunk.text
+            else:
+                source_text = str(chunk)
 
         chain = self._get_chain(question_type)
         result = chain.invoke({"text": source_text})
 
         if not result.flashcards:
-            return {"status": "skipped", "reason": "Insufficient information in chunk."}
+            return []
 
-        db = SessionLocal()
-        saved_cards = []
-        try:
-            initial_status = "approved" if settings.AUTO_ACCEPT_CONTENT else "pending"
-            for card in result.flashcards:
-                rubric_json = json.dumps([r.model_dump() for r in card.rubric])
-                fc = Flashcard(
-                    chunk_id=chunk_id,
-                    subtopic_id=subtopic_id,
-                    subject_id=subject_id,
-                    question=card.question,
-                    answer=card.answer,
-                    # Use the caller-requested type; LLM self-label can drift
-                    question_type=question_type,
-                    rubric=rubric_json,
-                    complexity_level=None,  # confirmed by mentor
-                    status=initial_status,
-                )
-                db.add(fc)
-                db.commit()
-                db.refresh(fc)
-                saved_cards.append({
-                    "flashcard_id": fc.id,
-                    "question": fc.question,
-                    "answer": fc.answer,
-                    "question_type": fc.question_type,
-                    "suggested_complexity": card.suggested_complexity,
-                })
-
-            return {"status": "success", "flashcards": saved_cards}
-        finally:
-            db.close()
+        drafts = []
+        for card in result.flashcards:
+            drafts.append(FlashcardDraft(
+                question=card.question,
+                answer=card.answer,
+                question_type=question_type,  # caller-requested type; LLM label can drift
+                rubric_json=json.dumps([r.model_dump() for r in card.rubric]),
+                suggested_complexity=card.suggested_complexity,
+            ))
+        return drafts
 
     def recreate_flashcard(self, flashcard_id: int, feedback: str) -> dict:
-        """Regenerates a flashcard based on mentor feedback and its original source."""
+        """Regenerates a flashcard based on mentor feedback and its original source.
+
+        Still writes to DB directly — this is a UI-driven flow that will be
+        decoupled in Phase 3 when the Mentor Review page calls the API.
+        """
         db = SessionLocal()
         try:
             fc = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()

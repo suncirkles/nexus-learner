@@ -3,10 +3,10 @@ tests/test_duplicates.py
 --------------------------
 Tests duplicate document detection via IngestionAgent.create_document_record().
 
-Current behaviour (post-PR #1):
-  - First call: creates and returns a new DBDocument row.
-  - Second call with identical file content: detects matching content_hash,
-    returns the EXISTING document (same id) without raising.
+Current behaviour (Phase 2b):
+  - First call: creates and returns a new document dict.
+  - Second call with identical file content: detects matching content_hash via
+    DocumentRepo.get_by_content_hash(), returns the EXISTING document dict (same id).
   - Only one Document row should exist in the DB for duplicate content.
 
 Patching notes:
@@ -66,12 +66,12 @@ def test_duplicate_detection(tmp_path, mock_embeddings):
     # Raise inside the title-generation try/except so it falls back to filename
     with patch("core.models.get_llm", side_effect=RuntimeError("skip title gen")):
         result1 = agent.create_document_record(test_file, doc_id1)
-        assert result1.id == doc_id1
+        assert result1["id"] == doc_id1
 
-        # Same content → returns the existing doc (no new row created)
+        # Same content → returns the existing doc dict (no new row created)
         result2 = agent.create_document_record(test_file, doc_id2)
 
-    assert result2.id == doc_id1, (
+    assert result2["id"] == doc_id1, (
         "Duplicate content should return the original document id, not a new one"
     )
 
@@ -99,7 +99,7 @@ def test_different_content_creates_separate_documents(tmp_path, mock_embeddings)
         result_a = agent.create_document_record(file1, doc_id_a)
         result_b = agent.create_document_record(file2, doc_id_b)
 
-    assert result_a.id != result_b.id, (
+    assert result_a["id"] != result_b["id"], (
         "Different content should produce different document records"
     )
 

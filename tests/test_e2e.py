@@ -1,17 +1,18 @@
 """
 tests/test_e2e.py
 ------------------
-End-to-end test for the Phase 1 LangGraph workflow (current architecture).
+End-to-end test for the Phase 1 LangGraph workflow (Phase 2b architecture).
 
-Architecture (as of PR #1 decoupling):
+Architecture:
   INDEXING:   Ingest → AssignTopic (TopicAssignerAgent) → NextPage → FlushQdrant
   GENERATION: MatchTopics → Ingest → Generate (SocraticAgent) → Critic (CriticAgent) → Increment → END
 
-Mocking strategy:
-  - topic_assigner.assign_topic    → deterministic TopicAssignment (no LLM)
-  - _flush_qdrant_batch            → no-op (Qdrant not required for unit-style test)
-  - socratic_agent.generate_flashcard → writes a real Flashcard to DB, returns result dict
-  - critic_agent.evaluate_flashcard   → updates Flashcard score in DB, returns score dict
+Phase 2b mocking strategy:
+  - TopicAssignerAgent.assign_topic  → deterministic TopicAssignment (no LLM)
+  - _flush_qdrant_batch              → no-op (Qdrant not required)
+  - SocraticAgent.generate_flashcard → returns List[FlashcardDraft] (no DB write)
+  - CriticAgent.evaluate_flashcard   → returns CriticResult (no DB write)
+  - FlashcardRepo persists for real in the test DB
 """
 
 import os
@@ -38,7 +39,6 @@ def setup_db():
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     yield
-    # Drop and recreate (not just drop) so subsequent test modules still have tables
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
@@ -69,11 +69,7 @@ def mock_topic_assigner():
         subtopic_name="Derivatives",
         reasoning="Chunk discusses rates of change.",
     )
-    with patch.object(
-        workflows.phase1_ingestion.topic_assigner,
-        "assign_topic",
-        return_value=assignment,
-    ):
+    with patch("agents.topic_assigner.TopicAssignerAgent.assign_topic", return_value=assignment):
         yield assignment
 
 
@@ -121,18 +117,13 @@ def _make_state(mode, doc_id, subject_id=None, file_path=None, **overrides):
 def test_e2e_indexing_creates_topics_and_chunks(
     dummy_pdf, mock_topic_assigner, mock_qdrant, mock_title_llm
 ):
-    """INDEXING mode: chunk → assign → persist Topic/Subtopic/ContentChunk in DB.
-
-    node_ingest creates the Document row itself when current_page == 0.
-    Do NOT pre-seed the Document — that causes a UNIQUE constraint collision.
-    """
+    """INDEXING mode: chunk → assign → persist Topic/Subtopic/ContentChunk in DB."""
     doc_id = str(uuid.uuid4())
     state = _make_state("INDEXING", doc_id, file_path=dummy_pdf)
     workflows.phase1_ingestion.phase1_graph.invoke(state)
 
     db = SessionLocal()
     try:
-        # node_ingest creates the Document (content_hash-based dedup)
         doc = db.query(DBDocument).first()
         assert doc is not None, "node_ingest should have created a Document row"
 
@@ -154,14 +145,18 @@ def test_e2e_indexing_creates_topics_and_chunks(
 def test_e2e_generation_creates_flashcards(
     dummy_pdf, mock_topic_assigner, mock_qdrant, mock_title_llm
 ):
-    """GENERATION mode: after indexing, mocked agents produce Flashcard rows in DB."""
+    """GENERATION mode: after indexing, mocked agents produce Flashcard rows in DB.
+
+    Phase 2b: generate_flashcard returns List[FlashcardDraft]; node_generate
+    persists via FlashcardRepo. evaluate_flashcard returns CriticResult;
+    node_critic persists via FlashcardRepo.
+    """
     doc_id = str(uuid.uuid4())
 
     # --- INDEXING first (populates Topics/Subtopics/Chunks) ---
     index_state = _make_state("INDEXING", doc_id, file_path=dummy_pdf)
     workflows.phase1_ingestion.phase1_graph.invoke(index_state)
 
-    # Retrieve the actual doc_id assigned by node_ingest (content_hash dedup may change it)
     db = SessionLocal()
     try:
         actual_doc = db.query(DBDocument).first()
@@ -177,54 +172,38 @@ def test_e2e_generation_creates_flashcards(
     finally:
         db.close()
 
-    # --- Mock generation agents ---
-    def fake_generate(self_arg, chunk=None, subtopic_id=None, subject_id=None,
-                      question_type="active_recall", **kwargs):
-        s = SessionLocal()
-        try:
-            fc = Flashcard(
-                question="What does a derivative measure?",
-                answer="Instantaneous rate of change.",
-                question_type=question_type,
-                subtopic_id=subtopic_id,
-                subject_id=subject_id,
-                status="pending",
-            )
-            s.add(fc)
-            s.commit()
-            s.refresh(fc)
-            return {
-                "status": "success",
-                "flashcards": [{
-                    "flashcard_id": fc.id,
-                    "question": fc.question,
-                    "answer": fc.answer,
-                    "question_type": fc.question_type,
-                    "suggested_complexity": "medium",
-                }],
-            }
-        finally:
-            s.close()
+    # --- Mock generation agents with Phase 2b APIs ---
+    from agents.socratic import FlashcardDraft
+    from agents.critic import CriticResult
 
-    def fake_evaluate(flashcard_id=None, source_text="",
-                      question="", answer=""):
-        s = SessionLocal()
-        try:
-            fc = s.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
-            if fc:
-                fc.critic_score = 4
-                fc.critic_feedback = "Well grounded."
-                fc.critic_rubric_scores = json.dumps(
-                    {"accuracy": 4, "logic": 4, "grounding": 4, "clarity": 4}
-                )
-                fc.complexity_level = "medium"
-                s.commit()
-            return {"flashcard_id": flashcard_id, "score": 4, "feedback": "Well grounded."}
-        finally:
-            s.close()
+    def fake_generate(self, source_text="", question_type="active_recall", **kwargs):
+        """Returns List[FlashcardDraft] — no DB writes (Phase 2b)."""
+        return [FlashcardDraft(
+            question="What does a derivative measure?",
+            answer="Instantaneous rate of change.",
+            question_type=question_type,
+            rubric_json=json.dumps([
+                {"criterion": "Accuracy", "description": "Matches source."},
+                {"criterion": "Logic", "description": "Reasoning sound."},
+                {"criterion": "Grounding", "description": "From source."},
+            ]),
+            suggested_complexity="medium",
+        )]
 
-    with patch.object(workflows.phase1_ingestion.socratic_agent, "generate_flashcard", fake_generate), \
-         patch.object(workflows.phase1_ingestion.critic_agent, "evaluate_flashcard", fake_evaluate):
+    def fake_evaluate(self, source_text="", question="", answer="", flashcard_id=None):
+        """Returns CriticResult — no DB writes (Phase 2b)."""
+        return CriticResult(
+            aggregate_score=4,
+            rubric_scores={"accuracy": 4, "logic": 4, "grounding": 4, "clarity": 4},
+            rubric_scores_json=json.dumps({"accuracy": 4, "logic": 4, "grounding": 4, "clarity": 4}),
+            feedback="Well grounded.",
+            suggested_complexity="medium",
+            should_reject=False,
+            reject_reason="",
+        )
+
+    with patch("agents.socratic.SocraticAgent.generate_flashcard", fake_generate), \
+         patch("agents.critic.CriticAgent.evaluate_flashcard", fake_evaluate):
 
         gen_state = _make_state(
             "GENERATION", actual_doc_id, subject_id=subject_id,

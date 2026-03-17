@@ -61,6 +61,9 @@ class Settings(BaseSettings):
         default=["FlashcardOutput"],
         description="Schema __name__ values never stored in or served from cache",
     )
+    SEMANTIC_CACHE_BACKEND: str = "qdrant"   # "qdrant" | "redis"
+    REDIS_URL: str = "redis://localhost:6379"
+    REDIS_CACHE_DB: int = 1                  # separate DB index for cache
 
     # Application State
     AUTO_ACCEPT_CONTENT: bool = False  # If True, bypasses Mentor Review flag

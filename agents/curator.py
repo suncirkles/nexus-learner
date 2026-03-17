@@ -4,15 +4,19 @@ agents/curator.py
 Content structuring agent. Analyzes raw text to produce a hierarchical
 Topic → Subtopic structure using LLM-powered extraction. Merges new
 content into existing Subject hierarchies, avoiding duplicate topics.
-Persists the hierarchy to the relational database.
+
+Phase 2b change: curate_structure() no longer queries the DB or writes topics.
+The caller is responsible for:
+  1. Pre-querying the existing topic hierarchy as a formatted string.
+  2. Calling topic_repo.get_or_create() / topic_repo.get_or_create_subtopic()
+     for each topic/subtopic returned by this method.
 """
 
 import logging
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Dict, Any
 from core.models import get_llm, call_structured_chain
-from core.database import SessionLocal, Topic, Subtopic
 from core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -58,117 +62,79 @@ class CuratorAgent:
     def _build_chain(self):
         return _CURATOR_PROMPT | get_llm(purpose="primary").with_structured_output(DocumentStructure)
 
-    def curate_structure(self, subject_id: int, doc_id: str, full_text: str):
-        """Analyzes text and merges it into the Subject's topic hierarchy."""
-        db = SessionLocal()
-        existing_structure_text = "No existing topics."
-        try:
-            from core.database import SubjectDocumentAssociation
-            # Get existing topics for this subject via all associated documents
-            existing_topics = db.query(Topic).join(SubjectDocumentAssociation, Topic.document_id == SubjectDocumentAssociation.document_id).\
-                filter(SubjectDocumentAssociation.subject_id == subject_id).all()
-            
-            if existing_topics:
-                lines = []
-                for t in existing_topics:
-                    subs = db.query(Subtopic).filter(Subtopic.topic_id == t.id).all()
-                    sub_names = ", ".join([s.name for s in subs])
-                    lines.append(f"- Topic: {t.name} (Sub-topics: {sub_names})")
-                existing_structure_text = "\n".join(lines)
-            # C11 (defensive): existing_topics ORM objects are no longer accessed beyond this
-            # point — all data has been converted to plain strings in existing_structure_text.
-            # Do NOT access existing_topics after this line to avoid DetachedInstanceError if
-            # the session state changes during the long LLM call below.
+    def curate_structure(
+        self,
+        full_text: str,
+        existing_structure_text: str = "No existing topics.",
+    ) -> Dict[str, Any]:
+        """Analyzes text and returns a topic hierarchy — no DB writes.
 
-            analysis_text = full_text[:15000]
-            # Rebuild chain per-call when hopping so provider selection is fresh
-            if settings.MODEL_HOP_ENABLED:
-                self._chain = self._build_chain()
-            structure = call_structured_chain(
-                self._chain,
-                DocumentStructure,
-                {"content": analysis_text, "existing_structure": existing_structure_text},
-            )
-            
-            # H13: deduplicate topics/subtopics within the LLM response before DB writes.
-            # The model occasionally returns the same name twice; merging here prevents
-            # duplicate DB records even if the ilike check misses a flush-timing edge case.
-            seen_topic_keys: dict = {}
-            deduped_topics = []
-            for t in structure.topics:
-                key = t.name.strip().lower()
-                if key not in seen_topic_keys:
-                    seen_topic_keys[key] = t
-                    seen_sub_keys: set = set()
-                    unique_subs = []
-                    for s in t.subtopics:
-                        sub_key = s.name.strip().lower()
-                        if sub_key not in seen_sub_keys:
-                            seen_sub_keys.add(sub_key)
-                            unique_subs.append(s)
-                    t.subtopics = unique_subs
-                    deduped_topics.append(t)
-                else:
-                    existing = seen_topic_keys[key]
-                    existing_sub_keys = {s.name.strip().lower() for s in existing.subtopics}
-                    for s in t.subtopics:
-                        if s.name.strip().lower() not in existing_sub_keys:
-                            existing.subtopics.append(s)
-                            existing_sub_keys.add(s.name.strip().lower())
-                    logger.warning("Duplicate topic '%s' in LLM response — subtopics merged", t.name)
+        Args:
+            full_text: The document content to analyze (truncated to 15 000 chars internally).
+            existing_structure_text: Pre-formatted string describing the current topic
+                hierarchy for this subject (pre-queried by the calling workflow node).
 
-            topics_data = []
-            for t in deduped_topics:
-                db_topic = db.query(Topic).filter(
-                    Topic.document_id == doc_id, Topic.name.ilike(t.name)
-                ).first()
-                
-                if not db_topic:
-                    db_topic = Topic(
-                        document_id=doc_id,
-                        name=t.name,
-                        summary=t.summary
-                    )
-                    db.add(db_topic)
-                    db.flush()
-                
-                subtopics_list = []
-                for s in t.subtopics:
-                    # Check for existing subtopic within this topic
-                    db_subtopic = db.query(Subtopic).filter(
-                        Subtopic.topic_id == db_topic.id,
-                        Subtopic.name.ilike(s.name)
-                    ).first()
-                    
-                    if not db_subtopic:
-                        db_subtopic = Subtopic(
-                            topic_id=db_topic.id,
-                            name=s.name,
-                            summary=s.summary
-                        )
-                        db.add(db_subtopic)
-                        db.flush()
-                    
-                    subtopics_list.append({
-                        "id": db_subtopic.id,
-                        "name": db_subtopic.name,
-                        "summary": db_subtopic.summary
-                    })
-                
-                topics_data.append({
-                    "id": db_topic.id,
-                    "name": db_topic.name,
-                    "summary": db_topic.summary,
-                    "subtopics": subtopics_list
-                })
-            
-            db.commit()
-            return {
-                "doc_summary": structure.summary,
-                "hierarchy": topics_data
+        Returns:
+            {
+                "doc_summary": str,
+                "hierarchy": [
+                    {
+                        "name": str,
+                        "summary": str,
+                        "subtopics": [{"name": str, "summary": str}, ...]
+                    },
+                    ...
+                ]
             }
-        except Exception as e:
-            db.rollback()
-            raise e
-        finally:
-            db.close()
+        The caller is responsible for persisting topics/subtopics via topic_repo.
+        """
+        analysis_text = full_text[:15000]
+        # Rebuild chain per-call when hopping so provider selection is fresh
+        if settings.MODEL_HOP_ENABLED:
+            self._chain = self._build_chain()
+        structure = call_structured_chain(
+            self._chain,
+            DocumentStructure,
+            {"content": analysis_text, "existing_structure": existing_structure_text},
+        )
+
+        # H13: deduplicate topics/subtopics within the LLM response before returning.
+        # The model occasionally returns the same name twice; merging here prevents
+        # duplicate DB records even if the ilike check misses a flush-timing edge case.
+        seen_topic_keys: dict = {}
+        deduped_topics = []
+        for t in structure.topics:
+            key = t.name.strip().lower()
+            if key not in seen_topic_keys:
+                seen_topic_keys[key] = t
+                seen_sub_keys: set = set()
+                unique_subs = []
+                for s in t.subtopics:
+                    sub_key = s.name.strip().lower()
+                    if sub_key not in seen_sub_keys:
+                        seen_sub_keys.add(sub_key)
+                        unique_subs.append(s)
+                t.subtopics = unique_subs
+                deduped_topics.append(t)
+            else:
+                existing = seen_topic_keys[key]
+                existing_sub_keys = {s.name.strip().lower() for s in existing.subtopics}
+                for s in t.subtopics:
+                    if s.name.strip().lower() not in existing_sub_keys:
+                        existing.subtopics.append(s)
+                        existing_sub_keys.add(s.name.strip().lower())
+                logger.warning("Duplicate topic '%s' in LLM response — subtopics merged", t.name)
+
+        hierarchy = [
+            {
+                "name": t.name,
+                "summary": t.summary,
+                "subtopics": [{"name": s.name, "summary": s.summary} for s in t.subtopics],
+            }
+            for t in deduped_topics
+        ]
+
+        return {
+            "doc_summary": structure.summary,
+            "hierarchy": hierarchy,
+        }

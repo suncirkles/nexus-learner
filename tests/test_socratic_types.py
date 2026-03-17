@@ -1,24 +1,23 @@
 """
 tests/test_socratic_types.py
 ------------------------------
-Unit tests for the multi-format SocraticAgent.
+Unit tests for multi-format SocraticAgent (Phase 2b API).
 
-Strategy: mock the per-type LangChain chain so no LLM API calls are made.
-Each test verifies:
-  - FlashcardItem schema fields are present and typed correctly
-  - rubric contains exactly 3 RubricItems with criterion + description
+Phase 2b: generate_flashcard() returns List[FlashcardDraft] — no DB writes.
+DB persistence is the workflow node's responsibility (via FlashcardRepo).
+
+Tests:
+  - FlashcardDraft schema fields are present and typed correctly
+  - rubric_json contains exactly 3 criteria with criterion + description
   - suggested_complexity is one of {simple, medium, complex}
-  - question_type is persisted to the DB Flashcard row
-  - generate_flashcard() returns {"status": "success"}
-
-A second fixture uses the Calculus PDF (Ch.1, p.1) to confirm the agent
-loads correctly with a real academic source — the actual LLM call is still
-mocked, so this remains a fast, deterministic unit test.
+  - question_type on the draft reflects the caller-requested type
+  - FlashcardRepo correctly persists drafts to the DB
+  - Unknown question_type falls back to active_recall chain
+  - Empty LLM response returns empty list
 """
 
 import json
 import os
-import types
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -26,7 +25,6 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-# Ensure cheaper model for any live calls (matches conftest convention)
 os.environ.setdefault("PRIMARY_MODEL", "gpt-4o-mini")
 
 CALCULUS_PDF = os.path.abspath("D:/cse/calculus/Advanced Engineering Mathematics 10th Edition.pdf")
@@ -37,13 +35,16 @@ CALCULUS_AVAILABLE = os.path.exists(CALCULUS_PDF)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def mem_db():
-    """Isolated SQLite DB for these tests (not the project DB)."""
+def mem_engine():
     from core.database import Base
     engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(bind=engine)
-    Session = sessionmaker(bind=engine)
-    return Session
+    return engine
+
+
+@pytest.fixture(scope="module")
+def mem_db(mem_engine):
+    return sessionmaker(bind=mem_engine)
 
 
 # ---------------------------------------------------------------------------
@@ -68,93 +69,142 @@ def _make_fake_chain_result(question_type: str):
     ])
 
 
-def _make_chunk(text: str = "Sample source text about calculus derivatives."):
-    """Minimal ORM-like chunk object."""
-    chunk = MagicMock()
-    chunk.text = text
-    chunk.id = 42
-    # Ensure hasattr(chunk, 'page_content') is False
-    del chunk.page_content
-    return chunk
+def _make_agent(question_types=None):
+    """Return a SocraticAgent with mocked chains."""
+    from agents.socratic import SocraticAgent
+    agent = SocraticAgent.__new__(SocraticAgent)
+    agent.llm = MagicMock()
+    qtypes = question_types or ["active_recall", "fill_blank", "short_answer", "long_answer", "numerical", "scenario"]
+    agent._chains = {}
+    for qt in qtypes:
+        mock_chain = MagicMock()
+        mock_chain.invoke.return_value = _make_fake_chain_result(qt)
+        agent._chains[qt] = mock_chain
+    return agent
 
-
-# ---------------------------------------------------------------------------
-# Parametrised schema tests (mocked chain)
-# ---------------------------------------------------------------------------
 
 QUESTION_TYPES = ["active_recall", "fill_blank", "short_answer", "long_answer", "numerical", "scenario"]
 
 
+# ---------------------------------------------------------------------------
+# Phase 2b: FlashcardDraft schema tests
+# ---------------------------------------------------------------------------
+
 @pytest.mark.parametrize("qtype", QUESTION_TYPES)
-def test_flashcard_item_schema(qtype, mem_db):
-    """Each question type produces correct FlashcardItem schema."""
-    from agents.socratic import SocraticAgent
+def test_flashcard_item_schema(qtype):
+    """Each question type produces correct FlashcardDraft schema."""
+    from agents.socratic import FlashcardDraft
+
+    agent = _make_agent()
+    # Install the per-type chain mock
+    mock_chain = MagicMock()
+    mock_chain.invoke.return_value = _make_fake_chain_result(qtype)
+    agent._chains[qtype] = mock_chain
+
+    result = agent.generate_flashcard(source_text="Sample source text.", question_type=qtype)
+
+    assert isinstance(result, list)
+    assert len(result) == 1
+    draft = result[0]
+    assert isinstance(draft, FlashcardDraft)
+    assert draft.question_type == qtype
+    assert isinstance(draft.question, str) and draft.question
+    assert isinstance(draft.answer, str) and draft.answer
+    assert draft.suggested_complexity in ("simple", "medium", "complex")
+
+
+@pytest.mark.parametrize("qtype", QUESTION_TYPES)
+def test_rubric_json_has_three_criteria(qtype):
+    """rubric_json contains exactly 3 criteria with criterion + description."""
+    agent = _make_agent()
+    mock_chain = MagicMock()
+    mock_chain.invoke.return_value = _make_fake_chain_result(qtype)
+    agent._chains[qtype] = mock_chain
+
+    result = agent.generate_flashcard(source_text="Sample source text.", question_type=qtype)
+
+    assert len(result) == 1
+    rubric = json.loads(result[0].rubric_json)
+    assert isinstance(rubric, list)
+    assert len(rubric) == 3
+    for item in rubric:
+        assert "criterion" in item
+        assert "description" in item
+
+
+def test_unknown_question_type_falls_back_to_active_recall():
+    """An unrecognised question_type silently falls back to active_recall chain."""
+    from agents.socratic import SocraticAgent, FlashcardDraft
 
     agent = SocraticAgent.__new__(SocraticAgent)
-    fake_result = _make_fake_chain_result(qtype)
-
-    mock_chain = MagicMock()
-    mock_chain.invoke.return_value = fake_result
-    agent._chains = {qt: mock_chain for qt in QUESTION_TYPES}
     agent.llm = MagicMock()
+    ar_chain = MagicMock()
+    ar_chain.invoke.return_value = _make_fake_chain_result("active_recall")
+    agent._chains = {"active_recall": ar_chain}
 
-    chunk = _make_chunk()
+    result = agent.generate_flashcard(source_text="text", question_type="invalid_type")
 
-    # Patch SessionLocal to use the in-memory DB
-    with patch("agents.socratic.SessionLocal", mem_db):
-        result = agent.generate_flashcard(
-            doc_id=str(uuid.uuid4()),
-            chunk=chunk,
-            subtopic_id=None,
-            subject_id=None,
-            question_type=qtype,
-        )
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert isinstance(result[0], FlashcardDraft)
+    ar_chain.invoke.assert_called_once()
 
-    assert result["status"] == "success", f"Expected success for {qtype}, got: {result}"
-    cards = result["flashcards"]
-    assert len(cards) == 1
 
-    card = cards[0]
-    assert card["question_type"] == qtype
-    assert isinstance(card["question"], str) and card["question"]
-    assert isinstance(card["answer"], str) and card["answer"]
-    assert card["suggested_complexity"] in ("simple", "medium", "complex")
+def test_empty_flashcard_list_returns_empty():
+    """If LLM returns no flashcards, generate_flashcard() returns empty list."""
+    from agents.socratic import SocraticAgent, FlashcardOutput
 
+    agent = SocraticAgent.__new__(SocraticAgent)
+    agent.llm = MagicMock()
+    mock_chain = MagicMock()
+    mock_chain.invoke.return_value = FlashcardOutput(flashcards=[])
+    agent._chains = {qt: mock_chain for qt in QUESTION_TYPES}
+
+    result = agent.generate_flashcard(source_text="text", question_type="active_recall")
+    assert result == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b: FlashcardRepo persists FlashcardDraft correctly
+# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("qtype", QUESTION_TYPES)
-def test_rubric_saved_to_db(qtype, mem_db):
-    """rubric JSON is persisted to Flashcard row with 3 criteria."""
-    from agents.socratic import SocraticAgent
+def test_rubric_saved_to_db_via_repo(qtype, mem_engine, mem_db):
+    """FlashcardRepo.create() correctly persists FlashcardDraft to DB."""
+    from agents.socratic import FlashcardDraft
+    from repositories.sql.flashcard_repo import FlashcardRepo
     from core.database import Flashcard
 
-    agent = SocraticAgent.__new__(SocraticAgent)
-    fake_result = _make_fake_chain_result(qtype)
-
+    agent = _make_agent()
     mock_chain = MagicMock()
-    mock_chain.invoke.return_value = fake_result
-    agent._chains = {qt: mock_chain for qt in QUESTION_TYPES}
-    agent.llm = MagicMock()
+    mock_chain.invoke.return_value = _make_fake_chain_result(qtype)
+    agent._chains[qtype] = mock_chain
 
-    chunk = _make_chunk()
-    doc_id = str(uuid.uuid4())
+    drafts = agent.generate_flashcard(source_text="Sample source text.", question_type=qtype)
+    assert len(drafts) == 1
+    draft = drafts[0]
 
-    with patch("agents.socratic.SessionLocal", mem_db):
-        result = agent.generate_flashcard(
-            doc_id=doc_id,
-            chunk=chunk,
-            subtopic_id=None,
+    # Simulate workflow node: persist via FlashcardRepo
+    with patch("repositories.sql.flashcard_repo.SessionLocal", mem_db):
+        repo = FlashcardRepo()
+        saved = repo.create(
             subject_id=None,
-            question_type=qtype,
+            subtopic_id=None,
+            chunk_id=None,
+            question=draft.question,
+            answer=draft.answer,
+            question_type=draft.question_type,
+            rubric_json=draft.rubric_json,
+            status="pending",
         )
 
-    fc_id = result["flashcards"][0]["flashcard_id"]
+    fc_id = saved["id"]
     db = mem_db()
     try:
         fc = db.query(Flashcard).filter(Flashcard.id == fc_id).first()
         assert fc is not None
         assert fc.question_type == qtype
         assert fc.rubric is not None
-
         rubric = json.loads(fc.rubric)
         assert isinstance(rubric, list)
         assert len(rubric) == 3
@@ -165,72 +215,20 @@ def test_rubric_saved_to_db(qtype, mem_db):
         db.close()
 
 
-def test_unknown_question_type_falls_back_to_active_recall(mem_db):
-    """An unrecognised question_type silently falls back to active_recall chain."""
-    from agents.socratic import SocraticAgent
-
-    agent = SocraticAgent.__new__(SocraticAgent)
-    fake_result = _make_fake_chain_result("active_recall")
-
-    ar_chain = MagicMock()
-    ar_chain.invoke.return_value = fake_result
-    agent._chains = {"active_recall": ar_chain}
-    agent.llm = MagicMock()
-
-    chunk = _make_chunk()
-    with patch("agents.socratic.SessionLocal", mem_db):
-        result = agent.generate_flashcard(
-            doc_id=str(uuid.uuid4()),
-            chunk=chunk,
-            question_type="invalid_type",
-        )
-
-    assert result["status"] == "success"
-    ar_chain.invoke.assert_called_once()
-
-
-def test_empty_flashcard_list_returns_skipped(mem_db):
-    """If LLM returns no flashcards, generate_flashcard() returns skipped."""
-    from agents.socratic import SocraticAgent, FlashcardOutput
-
-    agent = SocraticAgent.__new__(SocraticAgent)
-    mock_chain = MagicMock()
-    mock_chain.invoke.return_value = FlashcardOutput(flashcards=[])
-    agent._chains = {qt: mock_chain for qt in QUESTION_TYPES}
-    agent.llm = MagicMock()
-
-    chunk = _make_chunk()
-    with patch("agents.socratic.SessionLocal", mem_db):
-        result = agent.generate_flashcard(
-            doc_id=str(uuid.uuid4()),
-            chunk=chunk,
-            question_type="active_recall",
-        )
-
-    assert result["status"] == "skipped"
-
-
 # ---------------------------------------------------------------------------
-# Calculus PDF smoke test (no LLM call — just verifies chunk loading)
+# Calculus PDF smoke test — verifies IngestionAgent text extraction only
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(not CALCULUS_AVAILABLE, reason="Calculus PDF not available")
 def test_calculus_pdf_chunk_text_nonempty():
-    """Confirm IngestionAgent can extract text from Ch.1 of the calculus book.
-
-    Page 0 is an image-only cover — scan pages 1-5 and accept any that has text.
-    (Tesseract OCR not required; PyMuPDF handles embedded text.)
-    """
+    """Confirm IngestionAgent can extract text from Ch.1 of the calculus book."""
     from agents.ingestion import IngestionAgent
     agent = IngestionAgent()
     found_text = ""
-    for page_idx in range(1, 6):  # skip cover page, try early chapter pages
+    for page_idx in range(1, 6):
         page_text = agent.load_page_text(CALCULUS_PDF, page_idx)
         if len(page_text) > 100:
             found_text = page_text
             break
     assert isinstance(found_text, str)
-    assert len(found_text) > 100, (
-        "Expected at least one of pages 1-5 of the calculus PDF to contain "
-        "embedded text (>100 chars). Check that PyMuPDF is installed."
-    )
+    assert len(found_text) > 100

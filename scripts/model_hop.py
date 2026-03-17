@@ -64,6 +64,7 @@ TIER_MODELS: dict[str, list[str]] = {
     ],
     "balanced": [
         "anthropic/claude-sonnet-4-6",           # paid tier — prioritised
+        "groq/llama-3.3-70b-versatile",          # free tier fallback
         "gemini/gemini-2.0-flash",
         "deepseek/deepseek-chat",
         "openai/gpt-4o",

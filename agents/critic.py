@@ -3,17 +3,22 @@ agents/critic.py
 -----------------
 Grounding evaluation agent. Scores AI-generated flashcards across four
 dimensions (accuracy, logic, grounding, clarity) on a 1–4 scale each.
-Auto-rejects cards where grounding_score < 2.
-Backward-compatible aggregate critic_score = round(mean of 4 sub-scores).
+Auto-rejects cards where grounding_score < 2 or clarity_score < 2.
+
+Phase 2b change: evaluate_flashcard() no longer writes to the database.
+It returns a CriticResult dataclass. The calling workflow node is
+responsible for persisting scores via flashcard_repo.update_critic_scores()
+and, when should_reject=True, updating the status via flashcard_repo.update_status().
 """
 
 import json
 import logging
+from dataclasses import dataclass
 from math import ceil
+from typing import Any, Optional
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 from core.models import get_llm, call_structured_chain
-from core.database import SessionLocal, Flashcard
 from core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -106,6 +111,23 @@ Return structured output with all 6 fields."""),
 GroundingEvaluation = RubricEvaluation
 
 
+@dataclass
+class CriticResult:
+    """Pure-data result returned by CriticAgent.evaluate_flashcard().
+
+    The caller (workflow node) is responsible for persisting these values
+    via flashcard_repo.update_critic_scores() and handling should_reject.
+    """
+    aggregate_score: int
+    rubric_scores: dict          # {"accuracy": int, "logic": int, "grounding": int, "clarity": int}
+    rubric_scores_json: str      # json.dumps(rubric_scores) — pre-serialised for repo call
+    feedback: str
+    suggested_complexity: str
+    should_reject: bool
+    reject_reason: str           # human-readable, empty when should_reject=False
+    error: Optional[str] = None  # set when LLM call fails
+
+
 def _clamp(value: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, int(value)))
 
@@ -115,20 +137,27 @@ def _aggregate(acc: int, log: int, grd: int, cla: int) -> int:
 
 
 class CriticAgent:
-    def __init__(self):
+    def __init__(self, llm: Any = None):
+        """Accept an optional llm for injection in tests; default to get_llm()."""
+        self._llm = llm
         self._chain = self._build_chain()
 
     def _build_chain(self):
-        return _EVAL_PROMPT | get_llm(purpose="primary", temperature=0.0).with_structured_output(RubricEvaluation)
+        llm = self._llm if self._llm is not None else get_llm(purpose="primary", temperature=0.0)
+        return _EVAL_PROMPT | llm.with_structured_output(RubricEvaluation)
 
     def evaluate_flashcard(
         self,
-        flashcard_id: int,
         source_text: str,
         question: str,
         answer: str,
-    ) -> dict:
-        """Evaluates a flashcard, writes 4-score rubric + aggregate to DB."""
+        flashcard_id: Optional[int] = None,  # kept for logging only
+    ) -> CriticResult:
+        """Evaluate a flashcard against its source text.
+
+        Returns a CriticResult dataclass — no DB writes.
+        The calling workflow node persists scores via flashcard_repo.
+        """
         try:
             # Rebuild chain per-call when hopping so provider selection is fresh
             if settings.MODEL_HOP_ENABLED:
@@ -144,61 +173,55 @@ class CriticAgent:
             cla = _clamp(eval_result.clarity_score, 1, 4)
             feedback = eval_result.feedback or ""
             suggested_complexity = eval_result.suggested_complexity or "medium"
-            # Normalise complexity to known values
             if suggested_complexity not in ("simple", "medium", "complex"):
                 suggested_complexity = "medium"
         except Exception as e:
-            logger.error("CriticAgent evaluation failed for flashcard %d: %s", flashcard_id, e)
-            return {"error": f"Evaluation failed: {e}"}
+            logger.error(
+                "CriticAgent evaluation failed for flashcard %s: %s",
+                flashcard_id, e,
+            )
+            return CriticResult(
+                aggregate_score=0,
+                rubric_scores={},
+                rubric_scores_json="{}",
+                feedback="",
+                suggested_complexity="medium",
+                should_reject=False,
+                reject_reason="",
+                error=f"Evaluation failed: {e}",
+            )
 
         aggregate_score = _aggregate(acc, log, grd, cla)
-        rubric_scores = {
-            "accuracy": acc,
-            "logic": log,
-            "grounding": grd,
-            "clarity": cla,
-        }
+        rubric_scores = {"accuracy": acc, "logic": log, "grounding": grd, "clarity": cla}
 
-        db = SessionLocal()
-        try:
-            fc = db.query(Flashcard).filter(Flashcard.id == flashcard_id).first()
-            if not fc:
-                return {"error": "Flashcard not found"}
+        # Auto-reject rule 1: answer not traceable to source
+        # Auto-reject rule 2: phantom data reference (table/figure not embedded)
+        should_reject = grd < 2 or cla < 2
+        reject_reason = (
+            f"grounding_score={grd}/4" if grd < 2
+            else f"clarity_score={cla}/4 (phantom data reference)"
+        ) if should_reject else ""
 
-            fc.critic_score = aggregate_score
-            fc.critic_feedback = feedback
-            fc.critic_rubric_scores = json.dumps(rubric_scores)
-            # Write suggested_complexity so Mentor HITL can pre-populate the selectbox
-            fc.complexity_level = suggested_complexity
+        if should_reject:
+            if settings.AUTO_ACCEPT_CONTENT:
+                logger.warning(
+                    "Flashcard %s %s but AUTO_ACCEPT_CONTENT=True — card stays approved.",
+                    flashcard_id, reject_reason,
+                )
+                should_reject = False
+                reject_reason = ""
+            else:
+                logger.info(
+                    "Flashcard %s auto-reject (%s). Feedback: %s",
+                    flashcard_id, reject_reason, feedback,
+                )
 
-            # Auto-reject rule 1: answer not traceable to source
-            # Auto-reject rule 2: phantom data reference (table/figure mentioned but not embedded)
-            #   — critic sets clarity=1 when question references unavailable external data
-            should_reject = grd < 2 or cla < 2
-            reject_reason = (
-                f"grounding_score={grd}/4" if grd < 2 else f"clarity_score={cla}/4 (phantom data reference)"
-            )
-            if should_reject:
-                if settings.AUTO_ACCEPT_CONTENT:
-                    logger.warning(
-                        "Flashcard %d %s but AUTO_ACCEPT_CONTENT=True "
-                        "— card remains approved. Feedback: %s",
-                        flashcard_id, reject_reason, feedback,
-                    )
-                else:
-                    fc.status = "rejected"
-                    logger.info(
-                        "Flashcard %d auto-rejected (%s). Feedback: %s",
-                        flashcard_id, reject_reason, feedback,
-                    )
-
-            db.commit()
-            return {
-                "flashcard_id": fc.id,
-                "score": aggregate_score,
-                "rubric_scores": rubric_scores,
-                "suggested_complexity": suggested_complexity,
-                "feedback": feedback,
-            }
-        finally:
-            db.close()
+        return CriticResult(
+            aggregate_score=aggregate_score,
+            rubric_scores=rubric_scores,
+            rubric_scores_json=json.dumps(rubric_scores),
+            feedback=feedback,
+            suggested_complexity=suggested_complexity,
+            should_reject=should_reject,
+            reject_reason=reject_reason,
+        )

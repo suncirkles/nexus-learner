@@ -1,0 +1,92 @@
+"""
+repositories/protocols.py
+--------------------------
+Structural-subtyping Protocol interfaces for all repository operations.
+Services and agents depend on these protocols — never on concrete implementations.
+This enables unit testing with mock repos and future storage-backend swaps.
+"""
+
+from typing import List, Optional, Protocol, runtime_checkable
+
+
+@runtime_checkable
+class SubjectRepoProtocol(Protocol):
+    def get_all_active(self) -> List[dict]: ...
+    def get_by_id(self, subject_id: int) -> Optional[dict]: ...
+    def create(self, name: str) -> dict: ...
+    def archive(self, subject_id: int) -> None: ...
+    def restore(self, subject_id: int) -> None: ...
+    def delete(self, subject_id: int) -> None: ...
+    def get_flashcard_stats(self, subject_id: int) -> dict: ...
+    """Returns {approved: int, pending: int, rejected: int}."""
+
+
+@runtime_checkable
+class DocumentRepoProtocol(Protocol):
+    def get_by_content_hash(self, content_hash: str) -> Optional[dict]: ...
+    def create(
+        self,
+        doc_id: str,
+        filename: str,
+        title: str,
+        content_hash: str,
+        source_type: str = "pdf",
+    ) -> dict: ...
+    def attach_to_subject(self, doc_id: str, subject_id: int) -> None: ...
+    def get_attached_to_subject(self, subject_id: int) -> List[dict]: ...
+
+
+@runtime_checkable
+class TopicRepoProtocol(Protocol):
+    def get_by_document(self, doc_id: str) -> List[dict]: ...
+    def get_or_create(self, doc_id: str, topic_name: str, summary: str = "") -> dict: ...
+    def get_or_create_subtopic(self, topic_id: int, name: str, summary: str = "") -> dict: ...
+    def delete_topic_cascade(self, topic_id: int, doc_id: str) -> int: ...
+    """Returns count of preserved approved flashcards."""
+
+
+@runtime_checkable
+class ChunkRepoProtocol(Protocol):
+    def create_batch(self, doc_id: str, chunks: List[dict]) -> List[dict]: ...
+    def get_by_subtopics(self, subtopic_ids: List[int]) -> List[dict]: ...
+
+
+@runtime_checkable
+class FlashcardRepoProtocol(Protocol):
+    def create(
+        self,
+        subject_id: int,
+        subtopic_id: int,
+        chunk_id: int,
+        question: str,
+        answer: str,
+        question_type: str,
+        rubric_json: str,
+        status: str = "pending",
+    ) -> dict: ...
+    def get_by_subject(self, subject_id: int, status: Optional[str] = None) -> List[dict]: ...
+    def update_status(self, flashcard_id: int, status: str, feedback: str = "") -> None: ...
+    def bulk_update_status(self, flashcard_ids: List[int], status: str) -> int: ...
+    def update_critic_scores(
+        self,
+        flashcard_id: int,
+        aggregate_score: int,
+        rubric_scores_json: str,
+        feedback: str,
+        complexity_level: str,
+    ) -> None: ...
+    def has_active_cards_for_subtopic(self, subject_id: int, subtopic_id: int) -> bool: ...
+
+
+@runtime_checkable
+class VectorStoreProtocol(Protocol):
+    def upsert_chunks(self, chunks: List[dict]) -> None: ...
+    """chunks: list of {"text": str, "metadata": dict}"""
+    def delete_by_document(self, document_id: str) -> None: ...
+    def search(
+        self,
+        query: str,
+        top_k: int = 10,
+        filter_doc_id: Optional[str] = None,
+    ) -> List[dict]: ...
+    def drop_collection(self) -> None: ...

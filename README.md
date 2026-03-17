@@ -1,154 +1,107 @@
-# 🎓 Nexus Learner
+# Nexus Learner
 
-An agentic AI platform that transforms static educational materials (PDFs, scanned images) into dynamic Active Recall flashcards using multi-agent workflows.
+Transform educational documents into Active Recall flashcards using a multi-agent AI pipeline with human-in-the-loop review.
 
-## ✨ Features
+## What it does
 
-- **Smart Ingestion** – Upload PDFs or images; text is extracted with OCR fallback and duplicate detection.
-- **Auto-Curation** – AI builds a Topic → Subtopic hierarchy from your documents.
-- **Flashcard Generation** – High-quality Active Recall Q&A pairs, grounded and fact-checked by a Critic Agent.
-- **Mentor Review (HITL)** – Approve, reject, or regenerate flashcards with bulk actions at topic level.
-- **Active Recall Study Room** – Study approved flashcards with show/hide answer format.
-- **Background Processing** – Initial burst of cards generated instantly; the rest processed in the background.
+Upload a PDF, image, or point it at a web topic — Nexus Learner:
 
-## 📋 Prerequisites
+1. Extracts and chunks the content
+2. Builds a Topic → Subtopic knowledge hierarchy (LLM-driven)
+3. Generates Active Recall Q&A flashcard pairs (SocraticAgent)
+4. Grades each card for grounding quality (CriticAgent, 1–5 score)
+5. Presents cards to a **Mentor** for approve/reject review
+6. Approved cards are available in the **Learner** study room
 
-| Dependency | Version | Notes |
-| :--- | :--- | :--- |
-| Python | 3.11+ | |
-| Docker | Latest | For Qdrant vector database |
-| Tesseract OCR | Latest | Optional – for scanned PDF/image support |
-| OpenAI API Key | – | Required for LLM and embeddings |
+## Architecture
 
-### Installing Tesseract (Optional)
+```
+Streamlit UI  →  ui/api_client.py  →  FastAPI (port 8000)
+                                          ↓
+                                     Services
+                                          ↓
+                               SQL Repos   Vector Repo
+                                  ↓              ↓
+                               SQLite         Qdrant
+```
 
-- **Windows**: Download from [UB Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) and add to PATH.
-- **macOS**: `brew install tesseract`
-- **Linux**: `sudo apt-get install tesseract-ocr`
+The LangGraph agent pipeline runs inside the FastAPI service layer. A semantic cache (Qdrant or Redis) deduplicates identical LLM calls across runs.
 
-## 🚀 Quick Start
+## Quick Start
 
-### 1. Clone the Repository
+### Prerequisites
+
+- Python 3.11+
+- Docker (for Qdrant)
+- At least one LLM API key: OpenAI, Groq, or Anthropic
+
+### Setup
 
 ```bash
-git clone <your-repo-url>
+git clone <repo>
 cd nexus-learner
-```
 
-### 2. Create a Virtual Environment
-
-```bash
 python -m venv venv
-
-# Windows
-venv\Scripts\activate
-
-# macOS/Linux
-source venv/bin/activate
-```
-
-### 3. Install Dependencies
-
-```bash
+source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
+
+cp .env.example .env            # add your API keys
+docker-compose up -d            # start Qdrant
 ```
 
-### 4. Configure Environment Variables
+### Run
 
-Copy the example `.env` file and fill in your API keys:
+Open two terminals:
 
 ```bash
-cp .env.example .env
-```
+# Terminal 1 — FastAPI service layer
+uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
 
-Edit `.env`:
-
-```env
-OPENAI_API_KEY=sk-your-openai-api-key
-ANTHROPIC_API_KEY=your-anthropic-api-key        # Optional
-LANGCHAIN_API_KEY=your-langsmith-api-key         # Optional, for tracing
-LANGCHAIN_TRACING_V2=false                       # Set to "true" to enable LangSmith
-LANGCHAIN_PROJECT=nexus_learner_mvp
-DB_URL=sqlite:///./nexus_v3.db
-QDRANT_URL=http://localhost:6333
-QDRANT_API_KEY=
-```
-
-### 5. Start Qdrant (Docker)
-
-```bash
-docker-compose up -d
-```
-
-This starts Qdrant on `http://localhost:6333`.
-
-### 6. Run the Application
-
-```bash
+# Terminal 2 — Streamlit frontend
 streamlit run app.py
 ```
 
-The app will open at `http://localhost:8501`.
+Open http://localhost:8501 in your browser.
 
-## 🧪 Running Tests
+## Key `.env` Settings
+
+| Variable | Default | Notes |
+|---|---|---|
+| `OPENAI_API_KEY` | — | Required if using OpenAI |
+| `GROQ_API_KEY` | — | Required if using Groq (free tier available) |
+| `DEFAULT_LLM_PROVIDER` | `openai` | `openai` / `groq` / `anthropic` |
+| `AUTO_ACCEPT_CONTENT` | `false` | Skip mentor review (useful for testing) |
+| `SEMANTIC_CACHE_BACKEND` | `qdrant` | `qdrant` (default) or `redis` |
+| `REDIS_URL` | `redis://localhost:6379` | Only needed for `redis` cache backend |
+
+## Agents
+
+| Agent | Role |
+|---|---|
+| IngestionAgent | PDF/image extraction, chunking, Qdrant embedding |
+| CuratorAgent | LLM-driven Topic→Subtopic hierarchy |
+| TopicAssignerAgent | Maps chunks to subtopics |
+| TopicMatcherAgent | Semantic matching of topics to subtopics |
+| RelevanceAgent | Filters chunks by topic relevance |
+| SocraticAgent | Generates Active Recall Q&A pairs |
+| CriticAgent | Grades flashcard grounding (1–5) |
+| WebResearcherAgent | Scrapes and deduplicates web content |
+
+## Running Tests
 
 ```bash
-# Set PYTHONPATH and run all tests
-# Windows PowerShell
-$env:PYTHONPATH="."; pytest tests/
-
-# macOS/Linux
-PYTHONPATH=. pytest tests/
+PYTHONPATH=. pytest tests/unit/ -v     # fast unit tests (no LLM calls)
+PYTHONPATH=. pytest tests/ -v          # all tests (requires API keys)
 ```
 
-## 📁 Project Structure
+## Stack
 
-```
-nexus-learner/
-├── app.py                          # Streamlit frontend (all views)
-├── agents/
-│   ├── ingestion.py                # Document parsing, chunking, embedding
-│   ├── curator.py                  # Topic/Subtopic hierarchy extraction
-│   ├── socratic.py                 # Flashcard generation & recreation
-│   └── critic.py                   # Grounding evaluation (1-5 scoring)
-├── core/
-│   ├── config.py                   # Pydantic Settings (.env loading)
-│   ├── models.py                   # LLM factory (get_llm)
-│   ├── database.py                 # SQLAlchemy ORM models
-│   └── background.py              # Background thread manager
-├── workflows/
-│   └── phase1_ingestion.py         # LangGraph pipeline definition
-├── tests/                          # Pytest test suite
-├── documents/
-│   ├── prd.md                      # Product Requirements Document
-│   └── hld.md                      # High Level Design
-├── docker-compose.yml              # Qdrant service
-├── requirements.txt                # Python dependencies
-├── .env.example                    # Template for environment variables
-└── README.md                       # This file
-```
-
-## 📖 Documentation
-
-- [Product Requirements Document (PRD)](documents/prd.md)
-- [High Level Design (HLD)](documents/hld.md)
-
-## 🛠️ Usage Guide
-
-1. **Create a Subject** – Go to "📚 Study Materials" and create a subject (e.g., "Machine Learning").
-2. **Upload a Document** – Select the subject, upload a PDF, and click "🚀 Process & Generate Hierarchy".
-3. **Review Flashcards** – Go to "👨‍🏫 Mentor Review" to approve/reject AI-generated cards.
-4. **Study** – Head to "🧠 Learner" to study approved flashcards with Active Recall.
-
-## ⚙️ Configuration
-
-| Setting | Environment Variable | Default |
-| :--- | :--- | :--- |
-| LLM Provider | `DEFAULT_LLM_PROVIDER` | `openai` |
-| Primary Model | `PRIMARY_MODEL` | `gpt-4o` |
-| Routing Model | `ROUTING_MODEL` | `gpt-4o-mini` |
-| Auto-Accept Content | `AUTO_ACCEPT_CONTENT` | `false` |
-
-## 📄 License
-
-This project is for educational purposes.
+- **LangGraph** — agent orchestration
+- **LangChain** — LLM abstraction, embeddings
+- **FastAPI + uvicorn** — service layer REST API
+- **Streamlit** — frontend UI
+- **SQLAlchemy + SQLite** — relational data
+- **Qdrant** — vector store (embeddings + semantic cache)
+- **Redis** — optional persistent semantic cache backend
+- **PyMuPDF + Tesseract** — PDF and image extraction
+- **LangSmith** — optional tracing (set `LANGCHAIN_TRACING_V2=true`)

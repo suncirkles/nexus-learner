@@ -271,28 +271,39 @@ class TestH16ScoreBadge:
 class TestH19NoFallback:
     """H19: assign_topic must raise on LLM failure, not return a 'General Overview' fallback."""
 
-    def test_raises_on_llm_failure(self):
+    @patch("agents.topic_assigner.get_llm")
+    def test_raises_on_llm_failure(self, mock_get_llm):
         from agents.topic_assigner import TopicAssignerAgent
-        agent = TopicAssignerAgent.__new__(TopicAssignerAgent)
-        agent.llm = MagicMock()
-        agent.llm.invoke.side_effect = RuntimeError("LLM timed out")
+        mock_chain = MagicMock()
+        mock_chain.invoke.side_effect = RuntimeError("LLM timed out")
+        
+        with patch("agents.topic_assigner.ChatPromptTemplate.from_messages") as mock_prompt_cls:
+            mock_prompt = MagicMock()
+            mock_prompt.__or__.return_value = mock_chain
+            mock_prompt_cls.return_value = mock_prompt
+            
+            agent = TopicAssignerAgent()
+            with pytest.raises(RuntimeError, match="LLM timed out"):
+                agent.assign_topic("some chunk text", [])
 
-        with pytest.raises(RuntimeError, match="LLM timed out"):
-            agent.assign_topic("some chunk text", [])
-
-    def test_does_not_return_general_overview(self):
+    @patch("agents.topic_assigner.get_llm")
+    def test_does_not_return_general_overview(self, mock_get_llm):
         from agents.topic_assigner import TopicAssignerAgent
-        agent = TopicAssignerAgent.__new__(TopicAssignerAgent)
-        agent.llm = MagicMock()
-        agent.llm.invoke.side_effect = ValueError("parse error")
-
-        try:
-            result = agent.assign_topic("some chunk text", [])
-            # If we somehow get here (shouldn't), assert no General Overview
-            assert "General Overview" not in result.topic_name
-            assert "Introduction" not in result.subtopic_name
-        except (ValueError, RuntimeError):
-            pass  # Expected — exception propagated correctly
+        mock_chain = MagicMock()
+        mock_chain.invoke.side_effect = ValueError("parse error")
+        
+        with patch("agents.topic_assigner.ChatPromptTemplate.from_messages") as mock_prompt_cls:
+            mock_prompt = MagicMock()
+            mock_prompt.__or__.return_value = mock_chain
+            mock_prompt_cls.return_value = mock_prompt
+            
+            agent = TopicAssignerAgent()
+            try:
+                result = agent.assign_topic("some chunk text", [])
+                assert "General Overview" not in getattr(result, "topic_name", "")
+                assert "Introduction" not in getattr(result, "subtopic_name", "")
+            except (ValueError, RuntimeError):
+                pass
 
 
 # ===========================================================================

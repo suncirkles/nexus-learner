@@ -1,0 +1,166 @@
+[
+  {
+    "id": "item_1",
+    "source_text": "Basic probability definition.",
+    "target_question_type": "active_recall",
+    "expected_complexity": "simple",
+    "topic": "Fundamentals of Probability",
+    "subtopic": "Definitions and Terminology"
+  },
+  {
+    "id": "item_2",
+    "source_text": "Basic probability definition.",
+    "target_question_type": "active_recall",
+    "expected_complexity": "simple",
+    "topic": "Fundamentals of Probability",
+    "subtopic": "Definitions and Terminology"
+  },
+  {
+    "id": "item_3",
+    "source_text": "Basic probability definition.",
+    "target_question_type": "active_recall",
+    "expected_complexity": "simple",
+    "topic": "Fundamentals of Probability",
+    "subtopic": "Definitions and Terminology"
+  },
+  {
+    "id": "item_4",
+    "source_text": "Basic probability definition.",
+    "target_question_type": "active_recall",
+    "expected_complexity": "simple",
+    "topic": "Fundamentals of Probability",
+    "subtopic": "Definitions and Terminology"
+  },
+  {
+    "id": "item_5",
+    "source_text": "The sample space of an experiment is the set of all possible outcomes.",
+    "target_question_type": "fill_blank",
+    "expected_complexity": "medium",
+    "topic": "Fundamentals of Probability",
+    "subtopic": "Sample Spaces and Events"
+  },
+  {
+    "id": "item_6",
+    "source_text": "The sample space of an experiment is the set of all possible outcomes.",
+    "target_question_type": "fill_blank",
+    "expected_complexity": "medium",
+    "topic": "Fundamentals of Probability",
+    "subtopic": "Sample Spaces and Events"
+  },
+  {
+    "id": "item_7",
+    "source_text": "The sample space of an experiment is the set of all possible outcomes.",
+    "target_question_type": "fill_blank",
+    "expected_complexity": "medium",
+    "topic": "Fundamentals of Probability",
+    "subtopic": "Sample Spaces and Events"
+  },
+  {
+    "id": "item_8",
+    "source_text": "The sample space of an experiment is the set of all possible outcomes.",
+    "target_question_type": "fill_blank",
+    "expected_complexity": "medium",
+    "topic": "Fundamentals of Probability",
+    "subtopic": "Sample Spaces and Events"
+  },
+  {
+    "id": "item_9",
+    "source_text": "550 500 450 400 350 300 250 200 150 100 50 0 Millions of dollars Source: Chart prepared by U.S. Bureau of the Census. Johns Hopkins University Mass. Institute of Technology Stanford University University of Washington University of Michigan University of CA–Los Angeles University of CA–San Diego University of CA–San Francisco University of Wisconsin–Madison Columbia University–Main Division University of Pennsylvania University of Minnesota Harvard University Yale University University of Pittsburgh",
+    "target_question_type": "numerical",
+    "expected_complexity": "complex",
+    "topic": "Conditional Probability and Independence",
+    "subtopic": "Bayes' Theorem and Conditional Logic"
+  },
+  {
+    "id": "item_10",
+    "source_text": "P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2",
+    "target_question_type": "numerical",
+    "expected_complexity": "complex",
+    "topic": "Conditional Probability and Independence",
+    "subtopic": "Bayes' Theorem and Conditional Logic"
+  },
+  {
+    "id": "item_11",
+    "source_text": "P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2",
+    "target_question_type": "numerical",
+    "expected_complexity": "complex",
+    "topic": "Conditional Probability and Independence",
+    "subtopic": "Bayes' Theorem and Conditional Logic"
+  },
+  {
+    "id": "item_12",
+    "source_text": "P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2",
+    "target_question_type": "numerical",
+    "expected_complexity": "complex",
+    "topic": "Conditional Probability and Independence",
+    "subtopic": "Bayes' Theorem and Conditional Logic"
+  },
+  {
+    "id": "item_13",
+    "source_text": "Consider a coin tossing game.",
+    "target_question_type": "scenario",
+    "expected_complexity": "medium",
+    "topic": "Applied Probability Models",
+    "subtopic": "Independent Trials and Games"
+  },
+  {
+    "id": "item_14",
+    "source_text": "Consider a coin tossing game.",
+    "target_question_type": "scenario",
+    "expected_complexity": "medium",
+    "topic": "Applied Probability Models",
+    "subtopic": "Independent Trials and Games"
+  },
+  {
+    "id": "item_15",
+    "source_text": "Consider a coin tossing game.",
+    "target_question_type": "scenario",
+    "expected_complexity": "medium",
+    "topic": "Applied Probability Models",
+    "subtopic": "Independent Trials and Games"
+  },
+  {
+    "id": "item_16",
+    "source_text": "Consider a coin tossing game.",
+    "target_question_type": "scenario",
+    "expected_complexity": "medium",
+    "topic": "Applied Probability Models",
+    "subtopic": "Independent Trials and Games"
+  },
+  {
+    "id": "item_17",
+    "source_text": "x % $ & * ( ) ) \n  table 1 1 2 3 \n",
+    "target_question_type": "active_recall",
+    "expected_complexity": "simple",
+    "topic": "Unknown Document",
+    "subtopic": "Unclassified Data",
+    "is_bad_data": true
+  },
+  {
+    "id": "item_18",
+    "source_text": "The",
+    "target_question_type": "active_recall",
+    "expected_complexity": "simple",
+    "topic": "Unknown Document",
+    "subtopic": "Unclassified Data",
+    "is_bad_data": true
+  },
+  {
+    "id": "item_19",
+    "source_text": "This page intentionally left blank.",
+    "target_question_type": "active_recall",
+    "expected_complexity": "simple",
+    "topic": "Unknown Document",
+    "subtopic": "Unclassified Data",
+    "is_bad_data": true
+  },
+  {
+    "id": "item_20",
+    "source_text": "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+    "target_question_type": "active_recall",
+    "expected_complexity": "simple",
+    "topic": "Unknown Document",
+    "subtopic": "Unclassified Data",
+    "is_bad_data": true
+  }
+]

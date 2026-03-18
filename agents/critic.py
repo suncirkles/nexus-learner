@@ -34,7 +34,7 @@ class RubricEvaluation(BaseModel):
         ge=1, le=4,
     )
     grounding_score: int = Field(
-        description="1-4: Is the answer traceable to specific text in the source? 4=directly quoted/paraphrased, 1=not found in source.",
+        description="1-4: Is the answer traceable to concepts/principles or specific text in the source? 4=perfectly grounded in source concepts, 1=completely unrelated to source.",
         ge=1, le=4,
     )
     clarity_score: int = Field(
@@ -60,12 +60,12 @@ class RubricEvaluation(BaseModel):
 
 
 _EVAL_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", """You are an objective AI critic evaluating an AI-generated flashcard against the original Source Text.
+    ("system", """You are an objective AI critic evaluating an AI-generated flashcard against the original Source Text and the provided Subject Concepts.
 
 Score each dimension on a scale of 1–4:
-- accuracy_score  (1-4): Is the answer factually correct per the source?
+- accuracy_score  (1-4): Is the answer factually correct per the source and principles?
 - logic_score     (1-4): Is the reasoning sound?
-- grounding_score (1-4): Is the answer directly traceable to text in the source?
+- grounding_score (1-4): Is this flashcard firmly grounded in the intersection of the Source Text AND the Target Scopes shown below? (For SIMPLE or MEDIUM complexity questions, the card MUST be grounded in the Target Subtopic. For COMPLEX questions, it is acceptable to be grounded in the broader Target Topic. It must apply these concepts to the specific data, formulas, or principles found in the Source Text. Novel scenarios are acceptable ONLY if they utilize the core structure/logic of the Source Text).
 - clarity_score   (1-4): Is the question/answer unambiguous and fully self-contained?
 
 PHANTOM DATA REFERENCE — INSTANT FAIL:
@@ -80,30 +80,25 @@ question text scores clarity = 1, grounding = 1, and will be auto-rejected.
 Complexity classification — Bloom's Taxonomy / CBSE HOTS framework:
 
 SIMPLE   (Bloom's: Remember / Understand)
-  • The answer is a single fact that can be directly quoted or paraphrased from ONE sentence in the source.
+  • The answer tests basic recall or understanding of a single concept or fact from the source.
   • A student who has read the passage once can answer it with no additional reasoning.
   • Typical action verbs: Define, List, State, Identify, Summarize.
-  • Score signal: grounding_score = 4 AND logic_score ≤ 2.
 
 MEDIUM   (Bloom's: Apply / Analyse)
   • Requires "horizontal" thinking: applying a formula/concept to a scenario, explaining a
-    multi-step process, or comparing/contrasting ideas — but all evidence is in the source.
+    multi-step process, or comparing/contrasting ideas based on the source principles.
   • Typical action verbs: Calculate, Solve, Compare, Contrast, Explain, Illustrate.
-  • Score signal: grounding_score ≥ 3 AND logic_score = 3.
 
 COMPLEX  (Bloom's: Evaluate / Create — HOTS only)
   • Requires "vertical" integration: connecting concepts across different sections, evaluating or
-    justifying a claim, designing a solution, OR applying a principle to a completely novel/unfamiliar
-    scenario not described in the source (Transfer of Learning).
-  • CRITICAL RULE: if the answer can be directly quoted from a single passage → NOT complex.
+    justifying a claim, designing a solution, OR applying a principle to a highly complex/novel
+    scenario (Transfer of Learning).
   • Typical action verbs: Justify, Criticise, Formulate, Design, Integrate, Evaluate.
-  • Score signal: logic_score = 4 AND accuracy_score = 4 AND grounding_score ≤ 3
-    (synthesis is required — the answer cannot be found in a single passage).
 
 DEFAULT: when in doubt, assign MEDIUM. Reserve COMPLEX for genuine HOTS questions only.
 
 Return structured output with all 6 fields."""),
-    ("user", "Source Text:\n{source_text}\n\nGenerated Question: {question}\nGenerated Answer: {answer}"),
+    ("user", "Target Topic: {topic}\nTarget Subtopic: {subtopic}\n\nSource Text:\n{source_text}\n\nGenerated Question: {question}\nGenerated Answer: {answer}"),
 ])
 
 
@@ -152,6 +147,8 @@ class CriticAgent:
         question: str,
         answer: str,
         flashcard_id: Optional[int] = None,  # kept for logging only
+        topic: str = "General Content",
+        subtopic: str = "General Content",
     ) -> CriticResult:
         """Evaluate a flashcard against its source text.
 
@@ -165,7 +162,7 @@ class CriticAgent:
             eval_result = call_structured_chain(
                 self._chain,
                 RubricEvaluation,
-                {"source_text": source_text, "question": question, "answer": answer},
+                {"topic": topic, "subtopic": subtopic, "source_text": source_text, "question": question, "answer": answer},
             )
             acc = _clamp(eval_result.accuracy_score, 1, 4)
             log = _clamp(eval_result.logic_score, 1, 4)

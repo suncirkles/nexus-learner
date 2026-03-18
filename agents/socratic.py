@@ -115,20 +115,17 @@ The answer should outline the key steps/components a complete response must incl
 {_BASE_RULES}""",
 
     "numerical": f"""You are an expert educator generating Numerical/Derivation flashcards.
-Focus on: step-by-step derivations, calculations, or proofs drawn from the source.
-Each step in the answer must be linked to a formula or statement in the source text.
+Focus on: Creating NOVEL, variations of mathematical problems and derivations based on the concepts in the source text. 
+DO NOT simply copy equations, problems, or examples verbatim. You MUST create new scenarios, change the numbers, vary the datasets, and combine concepts to test true understanding.
 
 NUMERICAL-SPECIFIC RULES (in addition to CRITICAL GUIDELINES below):
-- The question MUST be entirely self-contained. Embed ALL required data — tables, given values,
-  formulas, equations — directly inside the question text using Markdown.
+- You MUST invent synthetic data (new numbers, new tables, new entities) that test the same underlying principles found in the text.
+- The question MUST be entirely self-contained. Embed ALL required data — tables, given values, formulas, equations — directly inside the question text using Markdown.
 - Format data tables as Markdown: | Hour | Temp (°F) | ... with a header separator row.
-- If the source has an OCR-garbled or partially illegible table, synthesise a clean equivalent:
-  same concept, same units, consistent values. Example: if the source discusses hourly temperature
-  data but the table is unreadable, create a small clean table (5–8 rows) with plausible values.
-- The numbers in your embedded table MUST match the numbers used in your answer exactly.
-  Cross-check before finalising: every quantity referenced in "Calculate..." must appear in the question.
-- NEVER reference "Table 1", "Table 2", "the table above", "the figure", or "the graph" as
-  external resources. If you need a table, build it and put it in the question.
+- If the source has a problem, create a functionally equivalent but distinctly different problem. Introduce variety.
+- The numbers and logic in your answer MUST strictly match the synthetic numbers you provided in the question.
+- NEVER reference "Table 1", "Table 2", "the table above", "the figure", or "the graph" as external resources. If you need a table, build it and put it in the question.
+- OVERRIDE BASE RULE 1: For numerical questions, it is ACCEPTABLE and EXPECTED that the specific numbers and scenario entities are NOT found in the source text, provided the mathematical logic is derived from the source.
 {_BASE_RULES}""",
 
     "scenario": f"""You are an expert educator generating Scenario-based flashcards.
@@ -137,6 +134,21 @@ The answer should explain the outcome or correct action with reference to the so
 {_BASE_RULES}""",
 }
 
+
+# ---------------------------------------------------------------------------
+# Few-Shot Extraction (for numericals)
+# ---------------------------------------------------------------------------
+def _get_novel_numerical_examples() -> str:
+    """Returns few-shot examples of finding a concept and creating a NOVEL variation."""
+    return """
+EXAMPLE SOURCE TEXT:
+A system has 3 components. The probability of each failing is 0.1. What is the probability that all 3 fail? 
+Solution: Assuming independence, P(all 3 fail) = (0.1)^3 = 0.001.
+
+EXPECTED NOVEL FLASHCARD OUTPUT:
+Question: An IoT network depends on 4 independent sensors. The probability that any single sensor goes offline during a storm is 0.05. Calculate the probability that all 4 sensors go offline simultaneously.
+Answer: Assuming the sensor failures are independent events, the probability of intersection is the product of individual probabilities. P(all 4 offline) = (0.05)^4 = 0.00000625.
+""".replace("{", "{{").replace("}", "}}")
 
 # ---------------------------------------------------------------------------
 # Agent
@@ -148,9 +160,11 @@ class SocraticAgent:
         self.llm = llm if llm is not None else get_llm(purpose="primary", temperature=0.3)
         self._chains: Dict[str, Any] = {}
         for qtype, system_msg in PROMPTS.items():
+            if qtype == "numerical":
+                system_msg += "\n\n" + _get_novel_numerical_examples()
             prompt = ChatPromptTemplate.from_messages([
                 ("system", system_msg),
-                ("user", "Source text:\n\n{text}"),
+                ("user", "Topic: {topic}\nSubtopic: {subtopic}\n\nSource text:\n\n{text}"),
             ])
             self._chains[qtype] = prompt | self.llm.with_structured_output(FlashcardOutput)
 
@@ -164,6 +178,8 @@ class SocraticAgent:
         self,
         source_text: str,
         question_type: str = "active_recall",
+        topic: str = "General Knowledge",
+        subtopic: str = "General Knowledge",
         context: str = "",
         # Legacy positional args kept for backward compatibility during Phase 2b transition
         doc_id: Optional[str] = None,
@@ -189,7 +205,7 @@ class SocraticAgent:
                 source_text = str(chunk)
 
         chain = self._get_chain(question_type)
-        result = chain.invoke({"text": source_text})
+        result = chain.invoke({"text": source_text, "topic": topic, "subtopic": subtopic})
 
         if not result.flashcards:
             return []

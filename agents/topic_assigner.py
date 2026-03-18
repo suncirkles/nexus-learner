@@ -55,9 +55,13 @@ RULES:
         ])
 
         try:
+            from core.context import get_langchain_config
             llm = get_llm(purpose="routing", temperature=0)
             chain = prompt | llm.with_structured_output(TopicAssignment)
-            result = chain.invoke({"hierarchy_context": hierarchy_str, "text": chunk_text[:3000]})
+            result = chain.invoke(
+                {"hierarchy_context": hierarchy_str, "text": chunk_text[:3000]},
+                config=get_langchain_config()
+            )
             if result is None:
                 raise RuntimeError("LLM returned None for topic assignment")
             # Normalize

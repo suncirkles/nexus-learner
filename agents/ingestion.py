@@ -141,13 +141,15 @@ class IngestionAgent:
         uploaded_filename = os.path.basename(file_path)
         title = uploaded_filename
         try:
-            from core.models import get_llm
-            from langchain_core.prompts import ChatPromptTemplate
+            from core.context import get_langchain_config
             title_llm = get_llm(purpose="primary", temperature=0)
             title_prompt = ChatPromptTemplate.from_template(
                 "Generate a short, professional title (max 5 words) for a document with the following content sample:\n\n{summary}"
             )
-            title_res = (title_prompt | title_llm).invoke({"summary": sample_text[:2000]})
+            title_res = (title_prompt | title_llm).invoke(
+                {"summary": sample_text[:2000]},
+                config=get_langchain_config()
+            )
             title = title_res.content.strip().strip('"')
         except Exception as e:
             logger.warning(f"Title generation failed: {e}")

@@ -22,6 +22,39 @@ Upload a PDF, image, or point it at a web topic — Nexus Learner:
 
 The LangGraph agent pipeline runs inside the FastAPI service layer. A semantic cache (Qdrant or Redis) deduplicates identical LLM calls across runs.
 
+## 🔍 Observability & Tracing
+
+Nexus Learner includes built-in observability to trace requests through the entire workflow.
+
+### Logging
+Logs are stored in `logs/nexus_learner.log` with a structured format:
+`2026-03-18 18:02:23 [INFO] [req:API_REQ_ID] [sess:STREAMLIT_SESS_ID] ...`
+- **req**: Unique ID for every API request.
+- **sess**: Unique ID for the user's Streamlit session. Use this to group all logs for a single user journey.
+
+### LangSmith Tracing
+To enable full agent tracing in [LangSmith](https://smith.langchain.com/):
+1. Create a LangSmith account and get an **API Key**.
+2. Add the following to your `.env` file:
+   ```env
+   LANGCHAIN_TRACING_V2=true
+   LANGCHAIN_PROJECT=nexus_learner
+   LANGCHAIN_API_KEY=ls__...
+   ```
+3. All agent runs will automatically appear in your project, tagged with the `session_id` and metadata including `request_id`.
+
+## 🛠️ Tech Stack
+
+- **LangGraph** — agent orchestration
+- **LangChain** — LLM abstraction, embeddings
+- **FastAPI + uvicorn** — service layer REST API
+- **Streamlit** — frontend UI
+- **SQLAlchemy + SQLite** — relational data
+- **Qdrant** — vector store (embeddings + semantic cache)
+- **Redis** — optional persistent semantic cache backend
+- **PyMuPDF + Tesseract** — PDF and image extraction
+- **LangSmith** — optional tracing (set `LANGCHAIN_TRACING_V2=true`)
+
 ## Quick Start
 
 ## Setup and Run

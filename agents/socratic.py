@@ -204,8 +204,12 @@ class SocraticAgent:
             else:
                 source_text = str(chunk)
 
+        from core.context import get_langchain_config
         chain = self._get_chain(question_type)
-        result = chain.invoke({"text": source_text, "topic": topic, "subtopic": subtopic})
+        result = chain.invoke(
+            {"text": source_text, "topic": topic, "subtopic": subtopic},
+            config=get_langchain_config()
+        )
 
         if not result.flashcards:
             return []
@@ -246,8 +250,12 @@ Return exactly one flashcard."""),
                 ("user", "Source text:\n\n{source_text}\n\nMentor Feedback: {feedback}")
             ])
 
+            from core.context import get_langchain_config
             recreate_chain = recreate_prompt | self.llm.with_structured_output(FlashcardOutput)
-            result = recreate_chain.invoke({"source_text": source_text, "feedback": feedback})
+            result = recreate_chain.invoke(
+                {"source_text": source_text, "feedback": feedback},
+                config=get_langchain_config()
+            )
 
             if not result.flashcards:
                 return {"status": "error", "message": "LLM returned no flashcard."}
@@ -287,8 +295,9 @@ Return exactly one flashcard."""),
                 ("user", f"Source text:\n\n{source_text}\n\nQuestion: {question}")
             ])
 
+            from core.context import get_langchain_config
             chain = prompt | self.llm
-            res = chain.invoke({})
+            res = chain.invoke({}, config=get_langchain_config())
             return res.content.strip()
         finally:
             db.close()

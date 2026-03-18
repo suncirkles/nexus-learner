@@ -13,6 +13,7 @@ the Windows IPv6→IPv4 fallback which adds ~2-3 s per fresh connection.
 """
 
 import logging
+import os
 import threading
 from typing import List, Optional
 from urllib.parse import urlparse, urlunparse
@@ -25,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Default to 127.0.0.1 — avoids IPv6 fallback delay on Windows.
 # Use urlparse so the replacement is scoped to the host component only.
-_raw_base = getattr(settings, "API_BASE_URL", "http://127.0.0.1:8000")
+_raw_base = getattr(settings, "API_BASE_URL", os.getenv("API_BASE_URL", "http://127.0.0.1:8000"))
 _parsed = urlparse(_raw_base)
 if _parsed.hostname and _parsed.hostname.lower() == "localhost":
     _parsed = _parsed._replace(

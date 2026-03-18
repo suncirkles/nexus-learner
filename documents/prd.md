@@ -144,3 +144,7 @@ To create an AI-driven "recursive" learning environment where the system doesn't
 | Embeddings | OpenAI text-embedding-ada-002 |
 | OCR | Tesseract via pytesseract |
 | PDF Parsing | PyMuPDF (fitz) |
+
+---
+*Note: Refer to `hld.md` and the associated `.excalidraw` diagrams for detailed architecture and entity-relationship models.*
+

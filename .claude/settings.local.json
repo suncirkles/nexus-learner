@@ -22,7 +22,8 @@
       "Bash(PYTHONPATH=. pytest tests/test_chunking_strategy.py tests/test_critic_rubric.py tests/test_duplicates.py tests/test_socratic_types.py -v --tb=short)",
       "Bash(PYTHONPATH=. uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload)",
       "Bash(PYTHONPATH=. uvicorn api.app:app --host 127.0.0.1 --port 8000 --reload)",
-      "Bash(PYTHONPATH=. python -m pytest tests/unit/ -x -q)"
+      "Bash(PYTHONPATH=. python -m pytest tests/unit/ -x -q)",
+      "Bash(gh pr:*)"
     ]
   }
 }

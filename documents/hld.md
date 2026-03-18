@@ -4,32 +4,7 @@
 
 Nexus Learner is a multi-agent AI platform that converts static educational documents and web content into interactive Active Recall flashcards. The system uses a pipeline of specialized AI agents orchestrated by LangGraph, with a Streamlit-based UI for human-in-the-loop review.
 
-```
-┌──────────────────────────────────────────────────────────┐
-│                    Streamlit Frontend                     │
-│  Dashboard │ Study Materials │ Mentor Review │ Learner   │
-└──────┬───────────────┬──────────────┬────────────────────┘
-       │               │              │
-       ▼               ▼              ▼
-┌──────────────────────────────────────────────────────────┐
-│                  Application Layer (app.py)               │
-│  render_dashboard │ render_study_materials │ ...          │
-└──────────────────────────┬───────────────────────────────┘
-                           │
-       ┌───────────────────┼───────────────────┐
-       ▼                   ▼                   ▼
-┌─────────────┐   ┌──────────────┐   ┌──────────────────┐
-│  LangGraph  │   │   Agents     │   │ Background Tasks │
-│  Workflow   │──▶│  (7 agents)  │   │  (threading)     │
-└─────────────┘   └──────┬───────┘   └──────────────────┘
-                         │
-          ┌──────────────┼──────────────┐
-          ▼              ▼              ▼
-   ┌───────────┐  ┌───────────┐  ┌───────────┐
-   │  SQLite   │  │  Qdrant   │  │  LLM APIs │
-   │  (ORM)    │  │ (Vectors) │  │ (OpenAI)  │
-   └───────────┘  └───────────┘  └───────────┘
-```
+[View High-Level System Architecture (Excalidraw)](architecture.excalidraw)
 
 ---
 
@@ -62,17 +37,7 @@ Seven specialized agents, each with a single responsibility:
 ### 2.4 Workflow Layer (`workflows/`)
 LangGraph-based stateful workflows defining the processing pipelines:
 
-```
-[Phase 1: Documents] START → Ingest → Curate → Generate → Critic → [Continue?]
-                                                                    │
-                                                            Yes ────► Increment ──┐
-                                                            No  ────► END      ◄──┘
-
-[Phase 2: Web]       START → Safety → Research → Ingest Web → Curate → Generate → Critic 
-                                                                                  │
-                                                            Yes ────◄─────────────┘ (loop)
-                                                            No  ────► next_document? → END
-```
+[View LangGraph Workflow Pipelines (Excalidraw)](workflow.excalidraw)
 
 ### 2.5 Infrastructure Layer (`core/`)
 
@@ -87,26 +52,7 @@ LangGraph-based stateful workflows defining the processing pipelines:
 
 ## 3. Data Model (ERD)
 
-```
-┌──────────┐     ┌───────────┐     ┌──────────┐     ┌───────────┐     ┌───────────┐
-│ Subject  │────▶│  Document │     │  Topic   │────▶│ Subtopic  │────▶│ Flashcard │
-│──────────│     │───────────│     │──────────│     │───────────│     │───────────│
-│ id (PK)  │     │ id (PK)   │     │ id (PK)  │     │ id (PK)   │     │ id (PK)   │
-│ name     │     │ subject_id│     │ subject_id│    │ topic_id  │     │ subtopic_id│
-│ is_archived    │ filename  │     │ doc_id   │     │ name      │     │ question  │
-└──────────┘     │ source_url│     │ name     │     │ summary   │     │ answer    │
-                 │ hash      │     │ summary  │     └───────────┘     │ critic_*  │
-                 └───────────┘     └──────────┘                       │ status    │
-                                                                      └───────────┘
-                 ┌───────────────┐
-                 │ ContentChunk  │
-                 │───────────────│
-                 │ id (PK)       │     ┌──────────────────────┐
-                 │ document_id   │────▶│ Qdrant Vector Store  │
-                 │ text          │     │ (nexus_chunks)       │
-                 │ source_url    │     └──────────────────────┘
-                 └───────────────┘
-```
+[View Entity Relationship Diagram (Excalidraw)](erd.excalidraw)
 
 ---
 
@@ -118,7 +64,8 @@ LangGraph-based stateful workflows defining the processing pipelines:
 | Orchestration | LangGraph | Stateful multi-agent workflow |
 | Primary LLM | OpenAI GPT-4o | Content generation, curation, evaluation |
 | Routing LLM | OpenAI GPT-4o-mini | Chunk-to-subtopic classification |
-| Vector DB | Qdrant (Docker) | Semantic search and RAG |
+| Vector DB | Qdrant (Docker) | Semantic search and initial RAG |
+| Semantic Cache | Redis | Caching LLM calls to deduplicate cost |
 | Relational DB | SQLite (via SQLAlchemy) | Structured data persistence |
 | Embeddings | OpenAI text-embedding-ada-002 | Document vectorization |
 | OCR | Tesseract (via pytesseract) | Scanned document support |

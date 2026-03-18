@@ -15,51 +15,86 @@ Upload a PDF, image, or point it at a web topic — Nexus Learner:
 
 ## Architecture
 
-```
-Streamlit UI  →  ui/api_client.py  →  FastAPI (port 8000)
-                                          ↓
-                                     Services
-                                          ↓
-                               SQL Repos   Vector Repo
-                                  ↓              ↓
-                               SQLite         Qdrant
-```
+[View System Architecture Diagram (Excalidraw)](documents/architecture.excalidraw)
+
+*The system uses LangGraph to orchestrate a pipeline of specialized AI agents within a FastAPI service layer.*
+
 
 The LangGraph agent pipeline runs inside the FastAPI service layer. A semantic cache (Qdrant or Redis) deduplicates identical LLM calls across runs.
 
 ## Quick Start
 
-### Prerequisites
+## Setup and Run
 
-- Python 3.11+
-- Docker (for Qdrant)
-- At least one LLM API key: OpenAI, Groq, or Anthropic
+### 1. Requirements
 
-### Setup
+- Python 3.11+ (if running locally)
+- Docker Desktop (if running via Docker Compose)
+- Accounts/API keys for LLM providers:
+  - OpenAI API key (required for core logic)
+  - Groq, Anthropic, Google Gemini, and/or DeepSeek keys (optional)
+
+### 2. Environment Configuration
+
+Copy `.env.example` to `.env` and fill out your keys:
 
 ```bash
-git clone <repo>
-cd nexus-learner
-
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-
-cp .env.example .env            # add your API keys
-docker-compose up -d            # start Qdrant
+cp .env.example .env
 ```
 
-### Run
+You **must** supply `OPENAI_API_KEY` to run the baseline configuration. Add others if you'd like to test model availability checking or agent routing via LiteLLM.
 
-Open two terminals:
+### 3. Run via Docker Compose (Recommended)
+
+The easiest way to spin up the entire application—which includes the vector database (Qdrant), semantic cache (Redis), FastAPI backend, and Streamlit frontend—is via Docker Compose:
 
 ```bash
-# Terminal 1 — FastAPI service layer
-uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+docker-compose up --build -d
+```
 
-# Terminal 2 — Streamlit frontend
+Once started:
+
+- Streamlit UI: <http://localhost:8501>
+- FastAPI Swagger UI: <http://localhost:8000/docs>
+- Qdrant DB logs are stored gracefully within the volume mount.
+- Note: Any changes to requirements or structural code will require another `--build`.
+
+**Useful Docker Commands:**
+- View logs for all services: `docker-compose logs -f`
+- View logs for a specific service: `docker-compose logs -f api` or `docker-compose logs -f ui`
+- Shut down the stack: `docker-compose down`
+
+### 4. Run Locally (Alternative)
+
+If you prefer to run the components independently or for localized debugging:
+
+First install the underlying tools (like Tesseract OCR) and the python dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Start up the local Qdrant container:
+
+```bash
+docker-compose up -d qdrant redis
+```
+
+Start the FastAPI backend:
+
+```bash
+uvicorn api.main:app --reload --port 8000
+```
+
+Start the Streamlit frontend UI:
+
+```bash
 streamlit run app.py
 ```
+
+## Acknowledgements
+
+Special thanks to the open-source community around AI agent development. In particular, the foundation of our multi-agent capabilities was significantly inspired by and utilizes components from **[msitarzewski/agency-agents](https://github.com/msitarzewski/agency-agents)**.
 
 Open http://localhost:8501 in your browser.
 

@@ -50,9 +50,9 @@ class TopicParserAgent:
 
         # Truncate very long inputs to avoid token explosion
         truncated = text.strip()[:6000]
-        prompt = _EXTRACT_PROMPT.format(text=truncated)
+        from core.context import get_langchain_config
         try:
-            response = self._llm.invoke(prompt)
+            response = self._llm.invoke(prompt, config=get_langchain_config())
             return self._parse_json_array(response.content)
         except Exception as exc:
             logger.error("Topic extraction from text failed: %s", exc)

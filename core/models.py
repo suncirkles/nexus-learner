@@ -146,9 +146,19 @@ def call_structured(
             _cache = None
 
     # 2. LLM call
+    from core.context import get_request_id, get_session_id
+    
     llm = get_llm(purpose=purpose, temperature=temperature)
+    config = {
+        "metadata": {
+            "request_id": get_request_id(),
+            "session_id": get_session_id(),
+        },
+        "tags": [get_session_id()]
+    }
+    
     try:
-        result = llm.with_structured_output(schema).invoke(prompt)
+        result = llm.with_structured_output(schema).invoke(prompt, config=config)
     except Exception as e:
         try:
             from scripts.model_hop import is_quota_error  # noqa: PLC0415
@@ -201,7 +211,16 @@ def call_structured_chain(
             _cache = None
             cache_key = None
 
-    result = chain.invoke(input_dict)
+    from core.context import get_request_id, get_session_id
+    config = {
+        "metadata": {
+            "request_id": get_request_id(),
+            "session_id": get_session_id(),
+        },
+        "tags": [get_session_id()]
+    }
+    
+    result = chain.invoke(input_dict, config=config)
 
     if _cache is not None and cache_key is not None and result is not None:
         try:

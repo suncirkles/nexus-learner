@@ -45,18 +45,15 @@ def _make_embeddings():
         )
 
     try:
-        try:
-            from langchain_huggingface import HuggingFaceEmbeddings
-        except ImportError:
-            from langchain_community.embeddings import HuggingFaceEmbeddings  # type: ignore
-        logger.info("Using HuggingFace all-MiniLM-L6-v2 embeddings (384 dims)")
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        from core.embeddings import FastEmbedEmbeddings
+        logger.info("Using FastEmbed all-MiniLM-L6-v2 embeddings (384 dims, ONNX)")
+        embeddings = FastEmbedEmbeddings()
         collection = _s.QDRANT_COLLECTION_NAME + "_hf"
         return embeddings, collection
     except Exception as e:
         raise ValueError(
-            "HuggingFace embeddings unavailable. "
-            "Install sentence-transformers: pip install sentence-transformers. "
+            "FastEmbed embeddings unavailable. "
+            "Install with: pip install 'qdrant-client[fastembed]'. "
             f"Original error: {e}"
         )
 

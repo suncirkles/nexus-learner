@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routers import subjects, flashcards, topics, library, system
+from api.middleware import ObservabilityMiddleware
 
 
 def create_app() -> FastAPI:
@@ -22,6 +23,9 @@ def create_app() -> FastAPI:
         description="REST API for the Nexus Learner multi-agent flashcard platform.",
     )
 
+    # Middleware order: Observability first to capture everything
+    app.add_middleware(ObservabilityMiddleware)
+    
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],

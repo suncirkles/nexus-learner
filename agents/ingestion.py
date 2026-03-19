@@ -52,18 +52,15 @@ def _make_embeddings():
         )
 
     try:
-        try:
-            from langchain_huggingface import HuggingFaceEmbeddings
-        except ImportError:
-            from langchain_community.embeddings import HuggingFaceEmbeddings  # type: ignore[no-redef]
-        logger.info("Using HuggingFace all-MiniLM-L6-v2 embeddings (384 dims)")
-        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        from core.embeddings import FastEmbedEmbeddings
+        logger.info("Using FastEmbed all-MiniLM-L6-v2 embeddings (384 dims, ONNX)")
+        embeddings = FastEmbedEmbeddings()
         collection = settings.QDRANT_COLLECTION_NAME + "_hf"
         return embeddings, collection
     except Exception as e:
         raise ValueError(
-            "HuggingFace embeddings unavailable. "
-            "Install sentence-transformers: pip install sentence-transformers. "
+            "FastEmbed embeddings unavailable. "
+            "Install with: pip install 'qdrant-client[fastembed]'. "
             f"Original error: {e}"
         )
 
@@ -141,13 +138,15 @@ class IngestionAgent:
         uploaded_filename = os.path.basename(file_path)
         title = uploaded_filename
         try:
-            from core.models import get_llm
-            from langchain_core.prompts import ChatPromptTemplate
+            from core.context import get_langchain_config
             title_llm = get_llm(purpose="primary", temperature=0)
             title_prompt = ChatPromptTemplate.from_template(
                 "Generate a short, professional title (max 5 words) for a document with the following content sample:\n\n{summary}"
             )
-            title_res = (title_prompt | title_llm).invoke({"summary": sample_text[:2000]})
+            title_res = (title_prompt | title_llm).invoke(
+                {"summary": sample_text[:2000]},
+                config=get_langchain_config()
+            )
             title = title_res.content.strip().strip('"')
         except Exception as e:
             logger.warning(f"Title generation failed: {e}")

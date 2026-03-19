@@ -9,6 +9,7 @@ Phase 1 refactoring (repository layer + app.py decomposition).
 
 import streamlit as st
 import logging
+import uuid
 
 # Logging must be configured before any other local imports so every module
 # that calls logging.getLogger(__name__) at import time inherits the setup.
@@ -99,6 +100,9 @@ def main():
         "🧠 Learner",
         "⚙️ System Tools",
     ]
+
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
 
     if "sidebar_nav" not in st.session_state:
         st.session_state.sidebar_nav = nav_options[0]

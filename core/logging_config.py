@@ -19,6 +19,15 @@ import logging
 import logging.handlers
 import os
 from pathlib import Path
+from core.context import get_request_id, get_session_id
+
+
+class ContextFilter(logging.Filter):
+    """Filter that injects context IDs (request_id, session_id) into log records."""
+    def filter(self, record):
+        record.request_id = get_request_id()
+        record.session_id = get_session_id()
+        return True
 
 
 def setup_logging() -> None:
@@ -46,8 +55,9 @@ def setup_logging() -> None:
     numeric_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
     root_logger.setLevel(numeric_level)
 
+    # Updated format string to include req and sess IDs
     fmt = logging.Formatter(
-        fmt="%(asctime)s [%(levelname)-8s] %(name)s — %(message)s",
+        fmt="%(asctime)s [%(levelname)-8s] [req:%(request_id)s] [sess:%(session_id)s] %(name)s — %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
@@ -64,11 +74,13 @@ def setup_logging() -> None:
     )
     file_handler.setLevel(numeric_level)
     file_handler.setFormatter(fmt)
+    file_handler.addFilter(ContextFilter())
 
     # --- Console (stream) handler ---
     console_handler = logging.StreamHandler()
     console_handler.setLevel(numeric_level)
     console_handler.setFormatter(fmt)
+    console_handler.addFilter(ContextFilter())
 
     root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)

@@ -58,14 +58,27 @@ def _get_client() -> httpx.Client:
     return _client
 
 
+def _get_headers() -> dict:
+    """Return headers including the current Streamlit session ID."""
+    import streamlit as st
+    headers = {"Connection": "keep-alive"}
+    if "session_id" in st.session_state:
+        headers["X-Session-ID"] = st.session_state.session_id
+    return headers
+
+
 def _get(path: str, **params) -> dict | list:
-    r = _get_client().get(path, params={k: v for k, v in params.items() if v is not None})
+    r = _get_client().get(
+        path, 
+        params={k: v for k, v in params.items() if v is not None},
+        headers=_get_headers()
+    )
     r.raise_for_status()
     return r.json()
 
 
 def _post(path: str, json: dict | None = None) -> dict | list | None:
-    r = _get_client().post(path, json=json)
+    r = _get_client().post(path, json=json, headers=_get_headers())
     r.raise_for_status()
     if r.status_code == 204:
         return None
@@ -73,13 +86,13 @@ def _post(path: str, json: dict | None = None) -> dict | list | None:
 
 
 def _patch(path: str, json: dict) -> None:
-    r = _get_client().patch(path, json=json)
+    r = _get_client().patch(path, json=json, headers=_get_headers())
     r.raise_for_status()
 
 
 def _delete(path: str, json: dict | None = None) -> dict | None:
     kwargs = {"json": json} if json else {}
-    r = _get_client().delete(path, **kwargs)
+    r = _get_client().delete(path, headers=_get_headers(), **kwargs)
     r.raise_for_status()
     return r.json() if r.content and r.status_code != 204 else None
 

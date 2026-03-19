@@ -2,7 +2,7 @@
 core/cache.py
 -------------
 Semantic cache for LLM structured output, backed by Qdrant and
-all-MiniLM-L6-v2 (local, sentence-transformers, 384-dim).
+all-MiniLM-L6-v2 (local, fastembed/ONNX, 384-dim).
 
 Usage
 -----
@@ -16,14 +16,13 @@ Usage
 
 Graceful degradation
 --------------------
-If Qdrant is unavailable or sentence-transformers is not installed,
+If Qdrant is unavailable or fastembed is not installed,
 ``get_cache()`` returns a ``_NullCache`` — all methods are no-ops.
 ``generate_structured()`` never fails due to cache errors.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 import threading
@@ -42,35 +41,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _load_embedder(label: str):
-    """Load all-MiniLM-L6-v2 via langchain_huggingface or langchain_community fallback.
+    """Load all-MiniLM-L6-v2 via fastembed (ONNX, no PyTorch).
 
-    Returns the embedder instance, or None if sentence-transformers is not installed.
-    Suppresses noisy import warnings from both packages.
+    Returns a FastEmbedEmbeddings instance, or None if fastembed is unavailable.
+    Requires qdrant-client[fastembed].
     """
-    import warnings
-
-    for _import_path in [
-        "langchain_huggingface.HuggingFaceEmbeddings",
-        "langchain_community.embeddings.HuggingFaceEmbeddings",
-    ]:
-        try:
-            module_path, cls_name = _import_path.rsplit(".", 1)
-            mod = importlib.import_module(module_path)
-            HFEmbeddings = getattr(mod, cls_name)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                embedder = HFEmbeddings(model_name="all-MiniLM-L6-v2")
-            logger.debug("%s: loaded embedder via %s", label, _import_path)
-            return embedder
-        except Exception as exc:
-            logger.debug("%s: embedder import failed (%s): %s", label, _import_path, exc)
-
-    logger.warning(
-        "%s: sentence-transformers not available — "
-        "install with: pip install sentence-transformers",
-        label,
-    )
-    return None
+    try:
+        from core.embeddings import FastEmbedEmbeddings
+        embedder = FastEmbedEmbeddings()
+        logger.debug("%s: loaded FastEmbed embedder (all-MiniLM-L6-v2)", label)
+        return embedder
+    except Exception as exc:
+        logger.warning(
+            "%s: fastembed not available — install with: pip install 'qdrant-client[fastembed]'. Error: %s",
+            label,
+            exc,
+        )
+        return None
 
 
 # ---------------------------------------------------------------------------

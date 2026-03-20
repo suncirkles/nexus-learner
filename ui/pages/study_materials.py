@@ -28,10 +28,17 @@ def _render_upload_tab(subject_id: int, subject_name: str):
     if not attached_docs:
         st.info("No documents attached to this subject yet.")
     else:
+        # Batch: 1 call for all topics in the subject, then map by document_id.
+        all_topics = api_client.get_topics_by_subject(subject_id)
+        topic_count_by_doc = {}
+        for t in all_topics:
+            doc_id = t.get("document_id")
+            if doc_id:
+                topic_count_by_doc[doc_id] = topic_count_by_doc.get(doc_id, 0) + 1
+
         for doc in attached_docs:
             col1, col2 = st.columns([0.8, 0.2])
-            topics = api_client.get_topics_by_document(doc["id"])
-            topic_count = len(topics)
+            topic_count = topic_count_by_doc.get(doc["id"], 0)
             col1.markdown(f"- **{doc.get('title') or doc.get('filename')}** ({topic_count} topics indexed)")
             if col2.button("🗑️ Detach", key=f"detach_{subject_id}_{doc['id']}"):
                 try:

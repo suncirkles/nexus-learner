@@ -158,3 +158,24 @@ class FlashcardSourceResponse(BaseModel):
     document_id: Optional[str]
     page_number: Optional[int]
     text: Optional[str]
+
+
+# ---------------------------------------------------------------------------
+# Batch / stats schemas (chatty API optimisations)
+# ---------------------------------------------------------------------------
+
+class SubjectWithStatsResponse(SubjectResponse):
+    """SubjectResponse extended with pre-aggregated counts."""
+    topic_count: int = 0
+    approved: int = 0
+    pending: int = 0
+    rejected: int = 0
+
+
+class ChunkSourceBatchRequest(BaseModel):
+    chunk_ids: List[int]
+
+
+class ChunkSourceBatchResponse(BaseModel):
+    # str keys because JSON object keys are always strings
+    sources: dict  # {str(chunk_id): FlashcardSourceResponse-compatible dict}

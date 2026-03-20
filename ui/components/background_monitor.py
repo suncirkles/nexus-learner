@@ -65,8 +65,19 @@ def _sidebar_monitor():
 
 
 def render_sidebar_background_monitor():
-    """Sidebar fragment showing active background tasks."""
-    _sidebar_monitor()
+    """Sidebar fragment showing active background tasks.
+
+    The run_every fragment is only mounted when there are active/failed tasks.
+    When idle this renders nothing — no fragment, no WebSocket polling, no errors.
+    """
+    from core.background import background_tasks, _lock as _bg_lock
+    with _bg_lock:
+        has_active = any(
+            t.get("status") in ("processing", "failed")
+            for t in background_tasks.values()
+        )
+    if has_active:
+        _sidebar_monitor()
 
 
 @st.fragment(run_every=5)
@@ -140,5 +151,13 @@ def _study_materials_monitor():
 
 
 def render_study_materials_background_monitor():
-    """Inline background task monitor shown at the bottom of Study Materials page."""
-    _study_materials_monitor()
+    """Inline background task monitor shown at the bottom of Study Materials page.
+
+    The run_every fragment is only mounted when tasks exist.
+    When idle this renders nothing — no fragment, no WebSocket polling, no errors.
+    """
+    from core.background import background_tasks, _lock as _bg_lock
+    with _bg_lock:
+        has_any = bool(background_tasks)
+    if has_any:
+        _study_materials_monitor()

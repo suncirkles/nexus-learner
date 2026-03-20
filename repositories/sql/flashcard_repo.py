@@ -8,7 +8,7 @@ agents/socratic.py, agents/critic.py, and app.py.
 
 import json
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 from core.database import SessionLocal, Flashcard
 
 logger = logging.getLogger(__name__)
@@ -65,11 +65,21 @@ class FlashcardRepo:
             db.refresh(fc)
             return _fc_to_dict(fc)
 
-    def get_by_subject(self, subject_id: int, status: Optional[str] = None) -> List[dict]:
+    def get_by_subject(
+        self,
+        subject_id: int,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+        question_type: Optional[str] = None,
+    ) -> List[dict]:
         with SessionLocal() as db:
             q = db.query(Flashcard).filter(Flashcard.subject_id == subject_id)
             if status is not None:
                 q = q.filter(Flashcard.status == status)
+            if question_type is not None:
+                q = q.filter(Flashcard.question_type == question_type)
+            q = q.offset(skip).limit(limit)
             return [_fc_to_dict(fc) for fc in q.all()]
 
     def get_by_id(self, flashcard_id: int) -> Optional[dict]:
@@ -212,12 +222,50 @@ class FlashcardRepo:
             rejected = db.query(func.count(Flashcard.id)).filter(Flashcard.status == "rejected").scalar() or 0
         return {"total": total, "approved": approved, "pending": pending, "rejected": rejected}
 
-    def get_by_subtopic(self, subtopic_id: int, status: Optional[str] = None) -> List[dict]:
+    def get_by_subtopic(
+        self,
+        subtopic_id: int,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+        question_type: Optional[str] = None,
+    ) -> List[dict]:
         with SessionLocal() as db:
             q = db.query(Flashcard).filter(Flashcard.subtopic_id == subtopic_id)
             if status is not None:
                 q = q.filter(Flashcard.status == status)
+            if question_type is not None:
+                q = q.filter(Flashcard.question_type == question_type)
+            q = q.offset(skip).limit(limit)
             return [_fc_to_dict(fc) for fc in q.all()]
+
+    def get_sources_by_chunk_ids(self, chunk_ids: List[int]) -> Dict[int, dict]:
+        """Single query: fetch source attribution for multiple chunk IDs.
+
+        Returns {chunk_id: source_dict}.
+        """
+        if not chunk_ids:
+            return {}
+        from core.database import ContentChunk, Document as DBDocument
+        with SessionLocal() as db:
+            chunks = db.query(ContentChunk).filter(ContentChunk.id.in_(chunk_ids)).all()
+            doc_ids = list({c.document_id for c in chunks if c.document_id})
+            docs_by_id = {}
+            if doc_ids:
+                docs = db.query(DBDocument).filter(DBDocument.id.in_(doc_ids)).all()
+                docs_by_id = {d.id: d for d in docs}
+            result: Dict[int, dict] = {}
+            for chunk in chunks:
+                doc = docs_by_id.get(chunk.document_id)
+                result[chunk.id] = {
+                    "source_type": chunk.source_type,
+                    "source_url": getattr(chunk, "source_url", None),
+                    "filename": doc.filename if doc else None,
+                    "document_id": chunk.document_id,
+                    "page_number": getattr(chunk, "page_number", None),
+                    "text": chunk.text,
+                }
+            return result
 
     def get_source_by_chunk(self, chunk_id: int) -> Optional[dict]:
         """Return source attribution info for a content chunk."""

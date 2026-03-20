@@ -44,7 +44,7 @@ class TestGetFlashcardsBySubject:
         mock_svc.get_by_subject.return_value = []
         r = client.get("/flashcards/subject/1?status=approved")
         assert r.status_code == 200
-        mock_svc.get_by_subject.assert_called_once_with(1, "approved")
+        mock_svc.get_by_subject.assert_called_once_with(1, "approved", 0, 50, None)
 
 
 class TestUpdateFlashcardStatus:

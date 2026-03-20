@@ -14,19 +14,41 @@ from ui.components.flashcard_card import render_flashcard_list, render_flashcard
 _ALL_QTYPES = ["active_recall", "fill_blank", "short_answer", "long_answer", "numerical", "scenario"]
 
 
+def _load_subject_tree(subject_id: int) -> list:
+    """Fetch topic tree for selected subject (1 API call = 2 DB queries). Cached in session state."""
+    cache_key = f"mentor_tree_{subject_id}"
+    return api_client.get_cached(cache_key, ttl_seconds=30, fetch_fn=lambda: _build_tree(subject_id))
+
+
+def _build_tree(subject_id: int) -> list:
+    topics_tree = api_client.get_topic_tree(subject_id)
+    return [{"topic": t, "subtopics": t.get("subtopics", [])} for t in topics_tree]
+
+
 def render_mentor_review():
     st.header("👨‍🏫 Mentor Review Workspace")
 
-    # Pre-fetch all subjects → topics → subtopics once and share across all tabs.
+    # Load subject list once (1 call); tree loaded lazily per selected subject.
     subjects = api_client.list_active_subjects()
-    subjects_data = []
-    for subj in subjects:
-        topics = api_client.get_topics_by_subject(subj["id"])
-        topics_data = []
-        for topic in topics:
-            subtopics = api_client.get_subtopics_by_topic(topic["id"])
-            topics_data.append({"topic": topic, "subtopics": subtopics})
-        subjects_data.append({"subj": subj, "topics_data": topics_data})
+
+    if not subjects:
+        st.info("No materials available for review.")
+        return
+
+    subject_names = [s["name"] for s in subjects]
+    subject_by_name = {s["name"]: s for s in subjects}
+
+    selected_name = st.selectbox(
+        "Select Subject", subject_names, key="mentor_selected_subject"
+    )
+    selected_subj = subject_by_name[selected_name]
+    subject_id = selected_subj["id"]
+
+    # Tree: 1 API call covers all topics + subtopics + counts for the selected subject.
+    topics_data = _load_subject_tree(subject_id)
+
+    # Wrap in list so the rest of the render logic stays consistent.
+    subjects_data = [{"subj": selected_subj, "topics_data": topics_data}]
 
     m_tabs = st.tabs(["⏳ Pending Review", "✅ Approved Items", "🗑️ Review Bin"])
 
@@ -65,6 +87,8 @@ def render_mentor_review():
                             if t_col1.button("✅ Approve All Topic", key=f"app_topic_{topic['id']}"):
                                 try:
                                     api_client.bulk_subtopic_action(sub_ids, "approve")
+                                    st.session_state.pop(f"mentor_tree_{subject_id}", None)
+                                    st.session_state.pop(f"mentor_tree_{subject_id}__ts", None)
                                     st.toast("Approved all pending cards for this topic.")
                                     st.rerun()
                                 except Exception as e:
@@ -72,6 +96,8 @@ def render_mentor_review():
                             if t_col2.button("❌ Reject All Topic", key=f"rej_topic_{topic['id']}"):
                                 try:
                                     api_client.bulk_subtopic_action(sub_ids, "reject")
+                                    st.session_state.pop(f"mentor_tree_{subject_id}", None)
+                                    st.session_state.pop(f"mentor_tree_{subject_id}__ts", None)
                                     st.toast("Rejected all pending cards for this topic.")
                                     st.rerun()
                                 except Exception as e:
@@ -80,8 +106,12 @@ def render_mentor_review():
                             for sub in subtopics:
                                 if sub.get("pending_count", 0) == 0:
                                     continue
-                                pending_fcs = api_client.get_flashcards_by_subtopic(sub["id"], "pending")
-                                if type_filter:
+                                # Pass single type server-side; multi-type filtered client-side.
+                                server_qtype = type_filter[0] if len(type_filter) == 1 else None
+                                pending_fcs = api_client.get_flashcards_by_subtopic(
+                                    sub["id"], "pending", question_type=server_qtype
+                                )
+                                if len(type_filter) > 1:
                                     pending_fcs = [f for f in pending_fcs if f.get("question_type") in type_filter]
                                 if pending_fcs:
                                     with st.container(border=True):
@@ -90,6 +120,8 @@ def render_mentor_review():
                                         if b_col1.button("✅ Approve All", key=f"app_all_{sub['id']}"):
                                             try:
                                                 api_client.bulk_subtopic_action([sub["id"]], "approve")
+                                                st.session_state.pop(f"mentor_tree_{subject_id}", None)
+                                                st.session_state.pop(f"mentor_tree_{subject_id}__ts", None)
                                                 st.toast(f"Approved all pending cards for {sub['name']}.")
                                                 st.rerun()
                                             except Exception as e:
@@ -97,6 +129,8 @@ def render_mentor_review():
                                         if b_col2.button("❌ Reject All", key=f"rej_all_{sub['id']}"):
                                             try:
                                                 api_client.bulk_subtopic_action([sub["id"]], "reject")
+                                                st.session_state.pop(f"mentor_tree_{subject_id}", None)
+                                                st.session_state.pop(f"mentor_tree_{subject_id}__ts", None)
                                                 st.toast(f"Rejected all pending cards for {sub['name']}.")
                                                 st.rerun()
                                             except Exception as e:
@@ -132,5 +166,10 @@ def render_mentor_review():
         rejected_fcs = api_client.get_all_rejected_flashcards()
         if not rejected_fcs:
             st.info("Review bin is empty.")
-        for fc in rejected_fcs:
-            render_flashcard_review_card(fc, "rejected")
+        else:
+            # Batch-fetch all chunk sources in 1 call instead of 1 per card.
+            chunk_ids = [fc["chunk_id"] for fc in rejected_fcs if fc.get("chunk_id")]
+            sources_map = api_client.get_chunk_sources_batch(chunk_ids)
+            for fc in rejected_fcs:
+                src = sources_map.get(str(fc.get("chunk_id"))) if fc.get("chunk_id") else None
+                render_flashcard_review_card(fc, "rejected", src=src)

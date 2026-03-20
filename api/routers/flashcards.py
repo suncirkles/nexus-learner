@@ -13,6 +13,8 @@ from api.schemas import (
     BulkStatusUpdate,
     BulkSubtopicAction,
     FlashcardSourceResponse,
+    ChunkSourceBatchRequest,
+    ChunkSourceBatchResponse,
 )
 from api.dependencies import get_flashcard_service
 from services.flashcard_service import FlashcardService
@@ -24,18 +26,24 @@ router = APIRouter(prefix="/flashcards", tags=["flashcards"])
 def get_flashcards_by_subject(
     subject_id: int,
     status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    question_type: Optional[str] = None,
     svc: FlashcardService = Depends(get_flashcard_service),
 ):
-    return svc.get_by_subject(subject_id, status)
+    return svc.get_by_subject(subject_id, status, skip, limit, question_type)
 
 
 @router.get("/subtopic/{subtopic_id}", response_model=List[FlashcardResponse])
 def get_flashcards_by_subtopic(
     subtopic_id: int,
     status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    question_type: Optional[str] = None,
     svc: FlashcardService = Depends(get_flashcard_service),
 ):
-    return svc.get_by_subtopic(subtopic_id, status)
+    return svc.get_by_subtopic(subtopic_id, status, skip, limit, question_type)
 
 
 @router.get("/rejected", response_model=List[FlashcardResponse])
@@ -51,6 +59,17 @@ def get_chunk_source(
     if result is None:
         raise HTTPException(status_code=404, detail="Chunk not found")
     return result
+
+
+@router.post("/chunk-sources", response_model=ChunkSourceBatchResponse)
+def get_chunk_sources_batch(
+    body: ChunkSourceBatchRequest,
+    svc: FlashcardService = Depends(get_flashcard_service),
+):
+    """Batch fetch source attribution for multiple chunk IDs (1 DB round-trip)."""
+    sources = svc.get_chunk_sources_batch(body.chunk_ids)
+    # JSON keys must be strings
+    return ChunkSourceBatchResponse(sources={str(k): v for k, v in sources.items()})
 
 
 @router.patch("/{flashcard_id}/status", status_code=status.HTTP_204_NO_CONTENT)

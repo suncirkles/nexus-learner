@@ -7,7 +7,7 @@ Topic listing, subtopic queries, and cascade-delete endpoint (H6 invariant enfor
 from typing import List
 from fastapi import APIRouter, Depends, status
 
-from api.schemas import TopicResponse, TopicDeleteRequest, SubtopicResponse
+from api.schemas import TopicResponse, TopicDeleteRequest, SubtopicResponse, TopicWithSubtopicsResponse
 from api.dependencies import get_topic_service
 from services.topic_service import TopicService
 
@@ -26,6 +26,14 @@ def get_topics_by_subject(
     subject_id: int, svc: TopicService = Depends(get_topic_service)
 ):
     return svc.get_by_subject(subject_id)
+
+
+@router.get("/subject/{subject_id}/tree", response_model=List[TopicWithSubtopicsResponse])
+def get_topic_tree(
+    subject_id: int, svc: TopicService = Depends(get_topic_service)
+):
+    """Return topics with embedded subtopics (incl. card counts) — 2 DB queries total."""
+    return svc.get_full_tree_by_subject(subject_id)
 
 
 @router.get("/{topic_id}/subtopics", response_model=List[SubtopicResponse])

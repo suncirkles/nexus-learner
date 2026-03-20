@@ -136,6 +136,44 @@ class Subtopic(Base):
     flashcards = relationship("Flashcard", back_populates="subtopic", cascade="all, delete-orphan")
 
 
+class BatchJob(Base):
+    """Tracks a submitted Anthropic Messages Batch API job."""
+    __tablename__ = "batch_jobs"
+
+    id = Column(String, primary_key=True, index=True)                  # local UUID
+    anthropic_batch_id = Column(String, nullable=True, index=True)     # set after submit
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
+    status = Column(String(20), default="indexing")
+    # enum: "indexing" | "submitted" | "collecting" | "completed" | "failed"
+    doc_ids = Column(Text)           # JSON list of document UUIDs
+    question_types = Column(Text)    # JSON list of question type strings
+    request_count = Column(Integer, default=0)
+    completed_count = Column(Integer, default=0)
+    error = Column(Text, nullable=True)
+    submitted_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    subject = relationship("Subject")
+    requests = relationship("BatchRequest", back_populates="job", cascade="all, delete-orphan")
+
+
+class BatchRequest(Base):
+    """Tracks one request within a batch job (custom_id → chunk + question_type)."""
+    __tablename__ = "batch_requests"
+
+    id = Column(String, primary_key=True)   # custom_id: "{job_id}:{chunk_id}:{qtype}"
+    job_id = Column(String, ForeignKey("batch_jobs.id", ondelete="CASCADE"), index=True)
+    chunk_id = Column(Integer, nullable=True)
+    question_type = Column(String(30))
+    status = Column(String(20), default="pending")
+    # enum: "pending" | "succeeded" | "errored"
+    flashcard_ids = Column(Text, nullable=True)  # JSON list of created flashcard IDs
+    error = Column(Text, nullable=True)
+
+    job = relationship("BatchJob", back_populates="requests")
+
+
 class Flashcard(Base):
     """Stores AI-generated Active Recall questions (Linked to a specific Subject)."""
     __tablename__ = "flashcards"

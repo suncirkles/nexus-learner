@@ -88,6 +88,10 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 400
     MAX_SUBTOPIC_CHARS: int = 12000   # max chars fed to Socratic per subtopic (≈3k tokens)
 
+    # Batch API settings
+    BATCH_MODEL: str = "claude-sonnet-4-6"   # Anthropic model for batch jobs (must be a Claude model)
+    BATCH_MIN_CHUNKS: int = 5                # minimum chunks to justify a batch submission
+
     # Web Scraping Settings
     WEB_SCRAPE_TIMEOUT: int = 10            # HTTP request timeout seconds
     WEB_MAX_PAGES_PER_TOPIC: int = 3        # Max pages to scrape per topic

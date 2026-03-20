@@ -11,6 +11,7 @@ from langgraph.graph import StateGraph, START, END
 from agents.ingestion import IngestionAgent
 from agents.socratic import SocraticAgent
 from agents.critic import CriticAgent
+from agents.curator import CuratorAgent
 from agents.topic_assigner import TopicAssignerAgent
 from agents.topic_matcher import TopicMatcherAgent
 from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, Document as DBDocument, SubjectDocumentAssociation
@@ -19,6 +20,7 @@ from core.config import settings
 import logging
 import os
 import uuid as _uuid
+import numpy as _np
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,10 @@ class GraphState(TypedDict):
     # Cards produced by the current chunk — consumed by node_critic
     current_new_cards: List[Dict[str, Any]]
 
+    # Subtopic embeddings for fast similarity-based chunk assignment (INDEXING only)
+    # Set by node_extract_hierarchy; empty list = fall back to per-chunk LLM assignment
+    subtopic_embeddings: List[Dict[str, Any]]  # [{id, name, embedding}]
+
     # Results
     generated_flashcards: List[Dict[str, Any]]
     status_message: str
@@ -60,6 +66,7 @@ class GraphState(TypedDict):
 #    this module (e.g. `from workflows.phase1_ingestion import phase1_graph`)
 #    no longer block startup with embedding-model loading.
 _ingestion_agent: "IngestionAgent | None" = None
+_curator_agent: "CuratorAgent | None" = None
 _topic_assigner: "TopicAssignerAgent | None" = None
 _topic_matcher: "TopicMatcherAgent | None" = None
 _socratic_agent: "SocraticAgent | None" = None
@@ -73,11 +80,24 @@ def _ingestion() -> "IngestionAgent":
     return _ingestion_agent
 
 
+def _curator() -> "CuratorAgent":
+    global _curator_agent
+    if _curator_agent is None:
+        _curator_agent = CuratorAgent()
+    return _curator_agent
+
+
 def _assigner() -> "TopicAssignerAgent":
     global _topic_assigner
     if _topic_assigner is None:
         _topic_assigner = TopicAssignerAgent()
     return _topic_assigner
+
+
+def _cosine_sim(a: List[float], b: List[float]) -> float:
+    va, vb = _np.array(a, dtype=float), _np.array(b, dtype=float)
+    denom = float(_np.linalg.norm(va) * _np.linalg.norm(vb))
+    return float(_np.dot(va, vb) / denom) if denom > 0 else 0.0
 
 
 def _matcher() -> "TopicMatcherAgent":
@@ -272,13 +292,16 @@ def node_ingest(state: GraphState):
             db_chunks = query.all()
             logger.info(f"Found {len(db_chunks)} candidate chunk(s) for generation.")
 
+            question_type = state.get("question_type", "active_recall")
             chunks_to_process = []
             for c in db_chunks:
-                # H22: only skip subtopics with approved/pending cards — if mentor rejected
-                # all cards for a subtopic, allow re-generation so gaps can be filled.
+                # H22: only skip subtopics with approved/pending cards of the SAME
+                # question_type — different types (e.g. active_recall vs numerical)
+                # should always be allowed to generate independently.
                 already_has_cards = db.query(Flashcard).filter(
                     Flashcard.subject_id == state["subject_id"],
                     Flashcard.subtopic_id == c.subtopic_id,
+                    Flashcard.question_type == question_type,
                     Flashcard.status.in_(["approved", "pending"]),
                 ).count() > 0
                 if already_has_cards:
@@ -297,69 +320,189 @@ def node_ingest(state: GraphState):
         finally:
             db.close()
 
-def node_assign_topic(state: GraphState):
-    """[INDEXING ONLY] Assigns topics globally and saves to Library.
+def node_extract_hierarchy(state: GraphState):
+    """[INDEXING ONLY] Extract topic/subtopic hierarchy via one CuratorAgent LLM call,
+    persist all topics and subtopics upfront, then compute subtopic embeddings
+    so that node_assign_topic can assign chunks via cosine similarity (no per-chunk LLM).
 
-    Accumulates Qdrant docs in state (pending_qdrant_docs) instead of issuing
-    one connection per chunk.  The batch is flushed in node_next_page /
-    node_flush_qdrant at page boundaries.
+    Falls back gracefully: if CuratorAgent fails, returns subtopic_embeddings=[]
+    and node_assign_topic falls back to the original per-chunk LLM path.
+    """
+    if state.get("mode") != "INDEXING":
+        return {}  # no-op for GENERATION
+
+    file_path = state["file_path"]
+    doc_id = state["doc_id"]
+
+    # Read up to 10 pages (or total_pages if already set) to sample document content
+    max_pages = state.get("total_pages") or _ingestion().get_page_count(file_path)
+    text_parts: List[str] = []
+    for p in range(min(max_pages, 10)):
+        text_parts.append(_ingestion().load_page_text(file_path, p))
+        if sum(len(t) for t in text_parts) >= 15000:
+            break
+    full_text = "\n\n".join(text_parts)
+
+    try:
+        result = _curator().curate_structure(full_text)
+    except Exception as e:
+        logger.warning(
+            "CuratorAgent failed (%s) — falling back to per-chunk LLM topic assignment", e
+        )
+        return {"subtopic_embeddings": [], "status_message": f"Hierarchy extraction failed: {e}"}
+
+    # Persist topics and subtopics; collect metadata for embedding
+    db = SessionLocal()
+    subtopic_meta: List[Dict[str, Any]] = []
+    hierarchy: List[Dict[str, Any]] = []
+    try:
+        for topic_data in result["hierarchy"]:
+            topic_obj = db.query(Topic).filter(
+                Topic.document_id == doc_id,
+                Topic.name.ilike(topic_data["name"]),
+            ).first()
+            if not topic_obj:
+                topic_obj = Topic(document_id=doc_id, name=topic_data["name"])
+                db.add(topic_obj)
+                db.commit()
+                db.refresh(topic_obj)
+
+            sub_names: List[str] = []
+            for sub_data in topic_data["subtopics"]:
+                sub_obj = db.query(Subtopic).filter(
+                    Subtopic.topic_id == topic_obj.id,
+                    Subtopic.name == sub_data["name"],
+                ).first()
+                if not sub_obj:
+                    sub_obj = Subtopic(topic_id=topic_obj.id, name=sub_data["name"])
+                    db.add(sub_obj)
+                    db.commit()
+                    db.refresh(sub_obj)
+                subtopic_meta.append({
+                    "id": sub_obj.id,
+                    "name": sub_data["name"],
+                    "summary": sub_data.get("summary", ""),
+                })
+                sub_names.append(sub_data["name"])
+            hierarchy.append({"topic": topic_data["name"], "subtopics": sub_names})
+    except Exception as e:
+        db.rollback()
+        logger.error("Failed to persist topic hierarchy: %s", e, exc_info=True)
+        return {"subtopic_embeddings": [], "status_message": f"Hierarchy persist failed: {e}"}
+    finally:
+        db.close()
+
+    if not subtopic_meta:
+        logger.warning("CuratorAgent returned empty hierarchy — falling back to per-chunk LLM.")
+        return {"subtopic_embeddings": [], "hierarchy": hierarchy, "status_message": "Empty hierarchy."}
+
+    # Embed subtopic names + summaries using the local ONNX model (no network call)
+    embed_texts = [
+        f"{s['name']}: {s['summary']}" if s["summary"] else s["name"]
+        for s in subtopic_meta
+    ]
+    vectors = _ingestion().embeddings.embed_documents(embed_texts)
+    subtopic_embeddings = [
+        {"id": s["id"], "name": s["name"], "embedding": v}
+        for s, v in zip(subtopic_meta, vectors)
+    ]
+
+    logger.info(
+        "node_extract_hierarchy: %d subtopic(s) extracted — chunk assignment will use cosine similarity.",
+        len(subtopic_embeddings),
+    )
+    return {
+        "hierarchy": hierarchy,
+        "subtopic_embeddings": subtopic_embeddings,
+        "status_message": f"Extracted {len(subtopic_embeddings)} subtopic(s) for {doc_id}.",
+    }
+
+
+def node_assign_topic(state: GraphState):
+    """[INDEXING ONLY] Assigns a chunk to a subtopic and persists it.
+
+    Fast path (default): cosine similarity against subtopic embeddings pre-computed
+    by node_extract_hierarchy — no LLM call, runs in milliseconds.
+
+    Fallback path: per-chunk LLM assignment via TopicAssignerAgent, used only when
+    node_extract_hierarchy was skipped or failed (subtopic_embeddings is empty).
     """
     idx = state["current_chunk_index"]
     chunk_text = state["chunks"][idx]
     doc_id = state["doc_id"]
     hierarchy = state.get("hierarchy", [])
     pending = list(state.get("pending_qdrant_docs", []))
+    subtopic_embeddings = state.get("subtopic_embeddings") or []
 
-    assignment = _assigner().assign_topic(chunk_text, hierarchy)
+    assigned_subtopic_id = None
 
+    if subtopic_embeddings:
+        # Fast path: embed chunk and pick nearest subtopic by cosine similarity
+        chunk_vec = _ingestion().embeddings.embed_query(chunk_text[:3000])
+        _, assigned_subtopic_id = max(
+            ((_cosine_sim(chunk_vec, s["embedding"]), s["id"]) for s in subtopic_embeddings),
+            key=lambda x: x[0],
+        )
+    else:
+        # Fallback: LLM-based assignment (original behaviour)
+        try:
+            assignment = _assigner().assign_topic(chunk_text, hierarchy)
+            db = SessionLocal()
+            try:
+                topic_obj = db.query(Topic).filter(
+                    Topic.document_id == doc_id,
+                    Topic.name.ilike(assignment.topic_name),
+                ).first()
+                if not topic_obj:
+                    topic_obj = Topic(document_id=doc_id, name=assignment.topic_name)
+                    db.add(topic_obj)
+                    db.commit()
+                    db.refresh(topic_obj)
+                    hierarchy.append({"topic": assignment.topic_name, "subtopics": [assignment.subtopic_name]})
+
+                sub_obj = db.query(Subtopic).filter(
+                    Subtopic.topic_id == topic_obj.id,
+                    Subtopic.name == assignment.subtopic_name,
+                ).first()
+                if not sub_obj:
+                    sub_obj = Subtopic(topic_id=topic_obj.id, name=assignment.subtopic_name)
+                    db.add(sub_obj)
+                    db.commit()
+                    db.refresh(sub_obj)
+                    for item in hierarchy:
+                        if item["topic"] == assignment.topic_name and assignment.subtopic_name not in item["subtopics"]:
+                            item["subtopics"].append(assignment.subtopic_name)
+
+                assigned_subtopic_id = sub_obj.id
+            except Exception as e:
+                db.rollback()
+                logger.error("LLM topic assignment DB write failed for chunk %d: %s", idx, e, exc_info=True)
+            finally:
+                db.close()
+        except Exception as e:
+            logger.error("LLM topic assignment failed for chunk %d: %s", idx, e, exc_info=True)
+
+    # Persist the chunk (regardless of which assignment path ran)
     db = SessionLocal()
     try:
-        topic_obj = db.query(Topic).filter(
-            Topic.document_id == doc_id,
-            Topic.name.ilike(assignment.topic_name)
-        ).first()
-        if not topic_obj:
-            topic_obj = Topic(document_id=doc_id, name=assignment.topic_name)
-            db.add(topic_obj)
-            db.commit()
-            db.refresh(topic_obj)
-            hierarchy.append({"topic": assignment.topic_name, "subtopics": [assignment.subtopic_name]})
-
-        sub_obj = db.query(Subtopic).filter(
-            Subtopic.topic_id == topic_obj.id,
-            Subtopic.name == assignment.subtopic_name
-        ).first()
-        if not sub_obj:
-            sub_obj = Subtopic(topic_id=topic_obj.id, name=assignment.subtopic_name)
-            db.add(sub_obj)
-            db.commit()
-            db.refresh(sub_obj)
-            for item in hierarchy:
-                if item["topic"] == assignment.topic_name and assignment.subtopic_name not in item["subtopics"]:
-                    item["subtopics"].append(assignment.subtopic_name)
-
         new_chunk = ContentChunk(
             document_id=doc_id,
             text=chunk_text,
-            subtopic_id=sub_obj.id,
+            subtopic_id=assigned_subtopic_id,
             page_number=state.get("current_page"),
         )
         db.add(new_chunk)
         db.commit()
         db.refresh(new_chunk)
-
-        # Queue for batch Qdrant upsert (flushed per page)
         pending.append({"text": chunk_text, "metadata": {"document_id": doc_id, "db_chunk_id": new_chunk.id}})
-
         return {
             "hierarchy": hierarchy,
             "pending_qdrant_docs": pending,
-            "status_message": f"Indexed topic: {assignment.subtopic_name}",
+            "status_message": f"Indexed chunk to subtopic id={assigned_subtopic_id}",
         }
-
     except Exception as e:
         db.rollback()
-        logger.error(f"Error indexing chunk {idx} for doc {doc_id}: {e}", exc_info=True)
+        logger.error("Error persisting chunk %d for doc %s: %s", idx, doc_id, e, exc_info=True)
         return {
             "hierarchy": hierarchy,
             "pending_qdrant_docs": pending,
@@ -496,6 +639,7 @@ def node_flush_qdrant(state: GraphState):
 workflow = StateGraph(GraphState)
 
 workflow.add_node("match_topics", node_match_topics)
+workflow.add_node("extract_hierarchy", node_extract_hierarchy)
 workflow.add_node("ingest", node_ingest)
 workflow.add_node("assign_topic", node_assign_topic)
 workflow.add_node("generate", node_generate)
@@ -506,8 +650,11 @@ workflow.add_node("flush_qdrant", node_flush_qdrant)
 
 # match_topics is a no-op for INDEXING; for GENERATION it resolves topic names
 # to subtopic IDs before node_ingest loads the chunk list.
+# extract_hierarchy is a no-op for GENERATION; for INDEXING it runs CuratorAgent
+# once upfront and computes subtopic embeddings for fast chunk assignment.
 workflow.add_edge(START, "match_topics")
-workflow.add_edge("match_topics", "ingest")
+workflow.add_edge("match_topics", "extract_hierarchy")
+workflow.add_edge("extract_hierarchy", "ingest")
 
 
 def router_after_ingest(state: GraphState):

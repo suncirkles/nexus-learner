@@ -29,6 +29,9 @@ _lock = threading.Lock()
 
 def run_document_generation(state: Dict[str, Any], doc_id: str, stop_event: threading.Event, filename: str = "Unknown"):
     """Runs the full Phase 1 LangGraph workflow in a background thread."""
+    from core.context import set_request_id, set_session_id
+    set_request_id(doc_id)
+    set_session_id("background")
     file_path = state.get("file_path")
     try:
         logger.info(f"Background thread started for Document: {doc_id} ({filename})")
@@ -138,6 +141,9 @@ def run_web_research_background(
     """Runs the Phase 2 web ingestion pipeline for remaining topics in a background thread."""
     from workflows.phase2_web_ingestion import phase2_graph
 
+    from core.context import set_request_id, set_session_id
+    set_request_id(task_id)
+    set_session_id("background")
     logger.info("Web research background thread started: %s (%d topics)", task_id, len(topics))
     with _lock:
         background_tasks[task_id] = {

@@ -63,11 +63,19 @@ def render_mentor_review():
                         with st.expander(f"📦 Topic: {topic['name']} Actions", expanded=False):
                             t_col1, t_col2, _ = st.columns([0.25, 0.25, 0.5])
                             if t_col1.button("✅ Approve All Topic", key=f"app_topic_{topic['id']}"):
-                                api_client.bulk_subtopic_action(sub_ids, "approve")
-                                st.rerun()
+                                try:
+                                    api_client.bulk_subtopic_action(sub_ids, "approve")
+                                    st.toast("Approved all pending cards for this topic.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to approve: {e}")
                             if t_col2.button("❌ Reject All Topic", key=f"rej_topic_{topic['id']}"):
-                                api_client.bulk_subtopic_action(sub_ids, "reject")
-                                st.rerun()
+                                try:
+                                    api_client.bulk_subtopic_action(sub_ids, "reject")
+                                    st.toast("Rejected all pending cards for this topic.")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to reject: {e}")
 
                             for sub in subtopics:
                                 if sub.get("pending_count", 0) == 0:
@@ -80,11 +88,19 @@ def render_mentor_review():
                                         st.markdown(f"#### 📖 {sub['name']} ({len(pending_fcs)} Pending)")
                                         b_col1, b_col2, _ = st.columns([0.2, 0.2, 0.6])
                                         if b_col1.button("✅ Approve All", key=f"app_all_{sub['id']}"):
-                                            api_client.bulk_subtopic_action([sub["id"]], "approve")
-                                            st.rerun()
+                                            try:
+                                                api_client.bulk_subtopic_action([sub["id"]], "approve")
+                                                st.toast(f"Approved all pending cards for {sub['name']}.")
+                                                st.rerun()
+                                            except Exception as e:
+                                                st.error(f"Failed to approve: {e}")
                                         if b_col2.button("❌ Reject All", key=f"rej_all_{sub['id']}"):
-                                            api_client.bulk_subtopic_action([sub["id"]], "reject")
-                                            st.rerun()
+                                            try:
+                                                api_client.bulk_subtopic_action([sub["id"]], "reject")
+                                                st.toast(f"Rejected all pending cards for {sub['name']}.")
+                                                st.rerun()
+                                            except Exception as e:
+                                                st.error(f"Failed to reject: {e}")
 
                                         render_flashcard_list(sub["id"], "pending")
                 st.divider()

@@ -8,7 +8,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.schemas import (
-    SubjectCreate, SubjectResponse, FlashcardStatsResponse,
+    SubjectCreate, SubjectResponse, SubjectWithStatsResponse, FlashcardStatsResponse,
     SubjectRenameRequest, GlobalStatsResponse, DocumentResponse,
 )
 from api.dependencies import get_subject_service
@@ -28,6 +28,12 @@ def create_subject(body: SubjectCreate, svc: SubjectService = Depends(get_subjec
 
 
 # Fixed-path routes must come BEFORE /{subject_id} parameterised routes
+@router.get("/with-stats", response_model=List[SubjectWithStatsResponse])
+def list_subjects_with_stats(svc: SubjectService = Depends(get_subject_service)):
+    """Return all active subjects with pre-aggregated topic and flashcard counts (3 DB queries total)."""
+    return svc.get_all_active_with_stats()
+
+
 @router.get("/archived", response_model=List[SubjectResponse])
 def list_archived_subjects(svc: SubjectService = Depends(get_subject_service)):
     return svc.get_all_archived()

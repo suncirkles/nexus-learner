@@ -22,9 +22,14 @@ class FlashcardService:
         self._chunks = chunk_repo
 
     def get_by_subject(
-        self, subject_id: int, status: Optional[str] = None
+        self,
+        subject_id: int,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+        question_type: Optional[str] = None,
     ) -> List[dict]:
-        return self._flashcards.get_by_subject(subject_id, status)
+        return self._flashcards.get_by_subject(subject_id, status, skip, limit, question_type)
 
     def update_status(
         self,
@@ -65,8 +70,19 @@ class FlashcardService:
     ) -> bool:
         return self._flashcards.has_active_cards_for_subtopic(subject_id, subtopic_id)
 
-    def get_by_subtopic(self, subtopic_id: int, status: Optional[str] = None) -> List[dict]:
-        return self._flashcards.get_by_subtopic(subtopic_id, status)
+    def get_by_subtopic(
+        self,
+        subtopic_id: int,
+        status: Optional[str] = None,
+        skip: int = 0,
+        limit: int = 50,
+        question_type: Optional[str] = None,
+    ) -> List[dict]:
+        return self._flashcards.get_by_subtopic(subtopic_id, status, skip, limit, question_type)
+
+    def get_chunk_sources_batch(self, chunk_ids: List[int]) -> dict:
+        """Batch fetch source attribution for multiple chunk IDs. Returns {chunk_id: source_dict}."""
+        return self._flashcards.get_sources_by_chunk_ids(chunk_ids)
 
     def delete_one(self, flashcard_id: int) -> None:
         self._flashcards.delete(flashcard_id)

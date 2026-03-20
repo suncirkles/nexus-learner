@@ -5,9 +5,9 @@ SQLAlchemy implementation of SubjectRepoProtocol.
 All queries that were previously scattered across app.py are collected here.
 """
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 from sqlalchemy import func, case, Integer
-from core.database import SessionLocal, Subject, Flashcard
+from core.database import SessionLocal, Subject, Flashcard, SubjectDocumentAssociation, Topic
 
 
 def _subject_to_dict(subj: Subject) -> dict:
@@ -75,6 +75,39 @@ class SubjectRepo:
                 "pending": rows[1] or 0,
                 "rejected": rows[2] or 0,
             }
+
+    def get_topic_counts_by_subject_ids(self, subject_ids: List[int]) -> Dict[int, int]:
+        """Single query: topics count per subject via SubjectDocumentAssociation JOIN."""
+        if not subject_ids:
+            return {}
+        with SessionLocal() as db:
+            rows = (
+                db.query(SubjectDocumentAssociation.subject_id, func.count(Topic.id))
+                .join(Topic, Topic.document_id == SubjectDocumentAssociation.document_id)
+                .filter(SubjectDocumentAssociation.subject_id.in_(subject_ids))
+                .group_by(SubjectDocumentAssociation.subject_id)
+                .all()
+            )
+            return {sid: count for sid, count in rows}
+
+    def get_flashcard_stats_by_subject_ids(self, subject_ids: List[int]) -> Dict[int, dict]:
+        """Single query: {approved, pending, rejected} counts per subject."""
+        if not subject_ids:
+            return {}
+        with SessionLocal() as db:
+            rows = (
+                db.query(Flashcard.subject_id, Flashcard.status, func.count(Flashcard.id))
+                .filter(Flashcard.subject_id.in_(subject_ids))
+                .group_by(Flashcard.subject_id, Flashcard.status)
+                .all()
+            )
+            result: Dict[int, dict] = {}
+            for sid, status, count in rows:
+                if sid not in result:
+                    result[sid] = {"approved": 0, "pending": 0, "rejected": 0}
+                if status in result[sid]:
+                    result[sid][status] = count
+            return result
 
     def get_all_archived(self) -> List[dict]:
         with SessionLocal() as db:

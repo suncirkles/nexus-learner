@@ -24,6 +24,23 @@ class SubjectService:
     def get_all_active(self) -> List[dict]:
         return self._subjects.get_all_active()
 
+    def get_all_active_with_stats(self) -> List[dict]:
+        """Return all active subjects with topic_count, approved, pending, rejected — 3 queries total."""
+        subjects = self._subjects.get_all_active()
+        if not subjects:
+            return []
+        subject_ids = [s["id"] for s in subjects]
+        topic_counts = self._subjects.get_topic_counts_by_subject_ids(subject_ids)
+        fc_stats = self._subjects.get_flashcard_stats_by_subject_ids(subject_ids)
+        for s in subjects:
+            sid = s["id"]
+            s["topic_count"] = topic_counts.get(sid, 0)
+            stats = fc_stats.get(sid, {"approved": 0, "pending": 0, "rejected": 0})
+            s["approved"] = stats["approved"]
+            s["pending"] = stats["pending"]
+            s["rejected"] = stats["rejected"]
+        return subjects
+
     def get_by_id(self, subject_id: int) -> Optional[dict]:
         return self._subjects.get_by_id(subject_id)
 

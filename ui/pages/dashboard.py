@@ -12,23 +12,16 @@ from ui import api_client
 
 @st.cache_data(ttl=30)
 def _get_dashboard_data() -> tuple:
-    """Returns (subjects_data, topic_counts, fc_stats, global_stats). Cached for 30 s."""
-    subjects = api_client.list_active_subjects()
-    global_stats = api_client.get_global_stats()
+    """Returns (subjects_data, topic_counts, fc_stats, global_stats). 2 API calls total."""
+    subjects = api_client.get_subjects_with_stats()  # 1 call (3 DB queries)
+    global_stats = api_client.get_global_stats()     # 1 call
 
     subjects_data = [(s["id"], s["name"]) for s in subjects]
-    topic_counts: dict = {}
-    fc_stats: dict = {}
-
-    for s in subjects:
-        sid = s["id"]
-        topics = api_client.get_topics_by_subject(sid)
-        topic_counts[sid] = len(topics)
-        stats = api_client.get_flashcard_stats(sid)
-        fc_stats[sid] = {
-            "approved": stats.get("approved", 0),
-            "pending": stats.get("pending", 0),
-        }
+    topic_counts = {s["id"]: s.get("topic_count", 0) for s in subjects}
+    fc_stats = {
+        s["id"]: {"approved": s.get("approved", 0), "pending": s.get("pending", 0)}
+        for s in subjects
+    }
 
     return subjects_data, topic_counts, fc_stats, global_stats
 

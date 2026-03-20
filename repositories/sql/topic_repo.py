@@ -7,8 +7,8 @@ Centralises topic/subtopic CRUD and the H6 cascade-delete invariant
 """
 
 import logging
-from typing import List, Optional
-from sqlalchemy import delete, update as sa_update
+from typing import Dict, List, Optional
+from sqlalchemy import delete, func, update as sa_update
 from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, SubjectDocumentAssociation
 
 logger = logging.getLogger(__name__)
@@ -140,6 +140,40 @@ class TopicRepo:
                 .all()
             )
             return [_topic_to_dict(t) for t in topics]
+
+    def get_subtopics_for_topic_ids(self, topic_ids: List[int]) -> Dict[int, List[dict]]:
+        """Single query: fetch all subtopics (with card counts) for multiple topic IDs.
+
+        Returns {topic_id: [subtopic_dict, ...]}.
+        """
+        if not topic_ids:
+            return {}
+        with SessionLocal() as db:
+            subs = db.query(Subtopic).filter(Subtopic.topic_id.in_(topic_ids)).all()
+            if not subs:
+                return {}
+
+            subtopic_ids = [s.id for s in subs]
+            counts: Dict[int, Dict[str, int]] = {}
+            rows = (
+                db.query(Flashcard.subtopic_id, Flashcard.status, func.count(Flashcard.id))
+                .filter(Flashcard.subtopic_id.in_(subtopic_ids))
+                .group_by(Flashcard.subtopic_id, Flashcard.status)
+                .all()
+            )
+            for sub_id, status, count in rows:
+                if sub_id not in counts:
+                    counts[sub_id] = {"approved": 0, "pending": 0}
+                if status in counts[sub_id]:
+                    counts[sub_id][status] = count
+
+            result: Dict[int, List[dict]] = {}
+            for s in subs:
+                d = _subtopic_to_dict(s)
+                d["approved_count"] = counts.get(s.id, {}).get("approved", 0)
+                d["pending_count"] = counts.get(s.id, {}).get("pending", 0)
+                result.setdefault(s.topic_id, []).append(d)
+            return result
 
     def get_subtopics_with_counts(self, topic_id: int) -> List[dict]:
         """Return subtopics for a topic with approved and pending card counts."""

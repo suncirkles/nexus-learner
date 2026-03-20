@@ -14,8 +14,9 @@ the Windows IPv6→IPv4 fallback which adds ~2-3 s per fresh connection.
 
 import logging
 import os
+import time
 import threading
-from typing import List, Optional
+from typing import Dict, List, Optional
 from urllib.parse import urlparse, urlunparse
 
 import httpx
@@ -134,14 +135,29 @@ def get_flashcard_stats(subject_id: int) -> dict:
     return _get(f"/subjects/{subject_id}/stats")  # type: ignore[return-value]
 
 
+def get_subjects_with_stats() -> List[dict]:
+    """1 API call: subjects list with pre-aggregated topic + flashcard counts."""
+    return _get("/subjects/with-stats")  # type: ignore[return-value]
+
+
 # ---------------------------------------------------------------------------
 # Flashcards
 # ---------------------------------------------------------------------------
 
 def get_flashcards_by_subject(
-    subject_id: int, status: Optional[str] = None
+    subject_id: int,
+    status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    question_type: Optional[str] = None,
 ) -> List[dict]:
-    return _get(f"/flashcards/subject/{subject_id}", status=status)  # type: ignore[return-value]
+    return _get(  # type: ignore[return-value]
+        f"/flashcards/subject/{subject_id}",
+        status=status,
+        skip=skip,
+        limit=limit,
+        question_type=question_type,
+    )
 
 
 def update_flashcard_status(
@@ -240,6 +256,11 @@ def get_topics_by_subject(subject_id: int) -> List[dict]:
     return _get(f"/topics/subject/{subject_id}")  # type: ignore[return-value]
 
 
+def get_topic_tree(subject_id: int) -> List[dict]:
+    """1 API call: topics with embedded subtopics + card counts (2 DB queries)."""
+    return _get(f"/topics/subject/{subject_id}/tree")  # type: ignore[return-value]
+
+
 def get_subtopics_by_topic(topic_id: int) -> List[dict]:
     return _get(f"/topics/{topic_id}/subtopics")  # type: ignore[return-value]
 
@@ -249,9 +270,19 @@ def get_subtopics_by_topic(topic_id: int) -> List[dict]:
 # ---------------------------------------------------------------------------
 
 def get_flashcards_by_subtopic(
-    subtopic_id: int, status: Optional[str] = None
+    subtopic_id: int,
+    status: Optional[str] = None,
+    skip: int = 0,
+    limit: int = 50,
+    question_type: Optional[str] = None,
 ) -> List[dict]:
-    return _get(f"/flashcards/subtopic/{subtopic_id}", status=status)  # type: ignore[return-value]
+    return _get(  # type: ignore[return-value]
+        f"/flashcards/subtopic/{subtopic_id}",
+        status=status,
+        skip=skip,
+        limit=limit,
+        question_type=question_type,
+    )
 
 
 def get_all_rejected_flashcards() -> List[dict]:
@@ -273,3 +304,33 @@ def get_chunk_source(chunk_id: int) -> Optional[dict]:
     except Exception as e:
         logger.warning("get_chunk_source(%d) error: %s", chunk_id, e)
         return None
+
+
+def get_chunk_sources_batch(chunk_ids: List[int]) -> Dict[str, dict]:
+    """Batch fetch source attribution — 1 API call for N chunk IDs."""
+    if not chunk_ids:
+        return {}
+    try:
+        result = _post("/flashcards/chunk-sources", json={"chunk_ids": chunk_ids})
+        return (result or {}).get("sources", {})
+    except Exception as e:
+        logger.warning("get_chunk_sources_batch failed: %s", e)
+        return {}
+
+
+# ---------------------------------------------------------------------------
+# Session-state TTL cache helper (avoids re-fetching within a single session)
+# ---------------------------------------------------------------------------
+
+def get_cached(key: str, ttl_seconds: float, fetch_fn):
+    """Return session_state[key] if fresh; otherwise call fetch_fn(), store, and return."""
+    import streamlit as st
+    ts_key = key + "__ts"
+    if key in st.session_state:
+        age = time.time() - st.session_state.get(ts_key, 0)
+        if age < ttl_seconds:
+            return st.session_state[key]
+    data = fetch_fn()
+    st.session_state[key] = data
+    st.session_state[ts_key] = time.time()
+    return data

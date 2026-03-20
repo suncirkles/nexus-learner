@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Any as AnyType
 from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
-from core.models import get_llm
+from core.models import get_llm, invoke_with_retry
 from core.database import SessionLocal, Flashcard, ContentChunk
 from core.config import settings
 
@@ -205,11 +205,21 @@ class SocraticAgent:
                 source_text = str(chunk)
 
         from core.context import get_langchain_config
-        chain = self._get_chain(question_type)
-        result = chain.invoke(
-            {"text": source_text, "topic": topic, "subtopic": subtopic},
-            config=get_langchain_config()
-        )
+        from scripts.model_hop import is_quota_error
+        result = None
+        for _attempt in range(2):
+            try:
+                chain = self._get_chain(question_type)
+                result = invoke_with_retry(
+                    chain.invoke,
+                    {"text": source_text, "topic": topic, "subtopic": subtopic},
+                    config=get_langchain_config()
+                )
+                break
+            except Exception as e:
+                if is_quota_error(e) and _attempt == 0:
+                    continue
+                raise
 
         if not result.flashcards:
             return []
@@ -251,11 +261,22 @@ Return exactly one flashcard."""),
             ])
 
             from core.context import get_langchain_config
-            recreate_chain = recreate_prompt | self.llm.with_structured_output(FlashcardOutput)
-            result = recreate_chain.invoke(
-                {"source_text": source_text, "feedback": feedback},
-                config=get_langchain_config()
-            )
+            from scripts.model_hop import is_quota_error
+            result = None
+            for _attempt in range(2):
+                try:
+                    _llm = get_llm(purpose="primary", temperature=0.0)
+                    recreate_chain = recreate_prompt | _llm.with_structured_output(FlashcardOutput)
+                    result = invoke_with_retry(
+                        recreate_chain.invoke,
+                        {"source_text": source_text, "feedback": feedback},
+                        config=get_langchain_config()
+                    )
+                    break
+                except Exception as _e:
+                    if is_quota_error(_e) and _attempt == 0:
+                        continue
+                    raise
 
             if not result.flashcards:
                 return {"status": "error", "message": "LLM returned no flashcard."}
@@ -296,8 +317,16 @@ Return exactly one flashcard."""),
             ])
 
             from core.context import get_langchain_config
-            chain = prompt | self.llm
-            res = chain.invoke({}, config=get_langchain_config())
-            return res.content.strip()
+            from scripts.model_hop import is_quota_error
+            for _attempt in range(2):
+                try:
+                    _llm = get_llm(purpose="primary", temperature=0.0)
+                    chain = prompt | _llm
+                    res = invoke_with_retry(chain.invoke, {}, config=get_langchain_config())
+                    return res.content.strip()
+                except Exception as _e:
+                    if is_quota_error(_e) and _attempt == 0:
+                        continue
+                    raise
         finally:
             db.close()

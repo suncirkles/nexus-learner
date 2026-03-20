@@ -6,6 +6,7 @@ __pycache__
 venv/
 env/
 */__pycache__/*
+**/__pycache__/
 *.pyc
 *.pyo
 *.pyd
@@ -16,3 +17,10 @@ logs/
 *.sqlite3
 qdrant_data/
 .vscode/
+# Large files not needed at build time
+documents/
+page_cache/
+tests/
+*.pdf
+*.excalidraw
+

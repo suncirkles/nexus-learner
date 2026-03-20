@@ -139,11 +139,13 @@ class IngestionAgent:
         title = uploaded_filename
         try:
             from core.context import get_langchain_config
+            from core.models import invoke_with_retry
             title_llm = get_llm(purpose="primary", temperature=0)
             title_prompt = ChatPromptTemplate.from_template(
                 "Generate a short, professional title (max 5 words) for a document with the following content sample:\n\n{summary}"
             )
-            title_res = (title_prompt | title_llm).invoke(
+            title_res = invoke_with_retry(
+                (title_prompt | title_llm).invoke,
                 {"summary": sample_text[:2000]},
                 config=get_langchain_config()
             )

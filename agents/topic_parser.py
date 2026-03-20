@@ -14,7 +14,7 @@ import logging
 import os
 from typing import List
 
-from core.models import get_llm
+from core.models import get_llm, invoke_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +51,17 @@ class TopicParserAgent:
         # Truncate very long inputs to avoid token explosion
         truncated = text.strip()[:6000]
         from core.context import get_langchain_config
-        try:
-            response = self._llm.invoke(prompt, config=get_langchain_config())
-            return self._parse_json_array(response.content)
-        except Exception as exc:
-            logger.error("Topic extraction from text failed: %s", exc)
-            # Fall back to a simple line-split heuristic
-            return self._fallback_parse(text)
+        from scripts.model_hop import is_quota_error
+        for _attempt in range(2):
+            try:
+                self._llm = get_llm(purpose="routing", temperature=0.0)
+                response = invoke_with_retry(self._llm.invoke, prompt, config=get_langchain_config())
+                return self._parse_json_array(response.content)
+            except Exception as exc:
+                if is_quota_error(exc) and _attempt == 0:
+                    continue
+                logger.error("Topic extraction from text failed: %s", exc)
+                return self._fallback_parse(text)
 
     def parse_topics_from_file(self, file_path: str, file_type: str) -> List[str]:
         """Extract topics from a .txt, .pdf, or .docx file.

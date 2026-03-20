@@ -11,6 +11,7 @@ import logging
 import streamlit as st
 
 from ui import api_client
+from ui.components.background_monitor import render_study_materials_background_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -81,3 +82,5 @@ def render_knowledge_library():
                 start_background_task(state, doc_id, filename=uploaded_file.name)
                 st.success("Global indexing started!")
                 st.rerun()
+
+    render_study_materials_background_monitor()

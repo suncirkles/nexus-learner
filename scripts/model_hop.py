@@ -44,7 +44,21 @@ import warnings
 from typing import Any, Optional, TYPE_CHECKING
 
 import litellm
-litellm.drop_params = True  # silently drop unsupported params (e.g. tool_choice=any on Gemini)
+litellm.drop_params = True       # silently drop unsupported params (e.g. tool_choice=any on Gemini)
+litellm.num_retries = 3          # retry on rate limits / transient errors
+litellm.retry_after = 3          # minimum seconds to wait between retries
+litellm.suppress_debug_info = True
+litellm.set_verbose = False
+
+# Session-level daily-quota blacklist — models added here are skipped by _pick_model_for_tier
+_exhausted_models: set[str] = set()
+
+
+def mark_model_exhausted(model: str) -> None:
+    """Mark a model as daily-quota exhausted for the lifetime of this process."""
+    if model not in _exhausted_models:
+        _exhausted_models.add(model)
+        logger.warning("[model_hop] %s daily quota exhausted — will skip for rest of session", model)
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -59,6 +73,7 @@ TIER_MODELS: dict[str, list[str]] = {
         "anthropic/claude-sonnet-4-6",          # Sonnet 4.6 — confirmed working structured output
         "groq/llama-3.3-70b-versatile",         # Groq free tier fallback
         "gemini/gemini-2.0-flash",
+        "deepseek/deepseek-chat",               # fallback when Groq daily quota exhausted
         # claude-haiku-4-5-20251001: structured output broken via LiteLLM (empty responses)
         # Restore once scripts/test_haiku_structured_output.py confirms the fix
     ],
@@ -117,16 +132,18 @@ def _pick_model_for_tier(tier: str) -> str:
     if not candidates:
         raise ValueError(f"Unknown tier: {tier!r}. Available: {list(TIER_MODELS)}")
     for model in candidates:
+        if model in _exhausted_models:
+            continue  # skip daily-quota-exhausted models
         for prefix, env_vars in KEY_MAP.items():
             if model.startswith(prefix):
                 if any(os.environ.get(v) for v in env_vars):
                     print(f"  [model_hop] tier={tier!r} -> {model}")
                     return model
                 break
-    tried = ", ".join(candidates)
+    tried = ", ".join(m for m in candidates if m not in _exhausted_models) or ", ".join(candidates)
     raise RuntimeError(
-        f"No API key found for any model in tier={tier!r}. "
-        f"Tried: {tried}. Set the appropriate key env var."
+        f"No API key found for any non-exhausted model in tier={tier!r}. "
+        f"Tried: {tried}. Set the appropriate key env var or wait for quota reset."
     )
 
 
@@ -159,7 +176,7 @@ def get_llm(
     elif model is None:
         raise ValueError("Provide model=, tier=, or task=")
 
-    return ChatLiteLLM(model=model, temperature=temperature)
+    return ChatLiteLLM(model=model, temperature=temperature, num_retries=3)
 
 
 def bind_structured(llm: "BaseChatModel", schema: type["BaseModel"]) -> Any:

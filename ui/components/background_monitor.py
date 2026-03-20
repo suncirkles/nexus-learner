@@ -36,6 +36,15 @@ def _sidebar_monitor():
                 min(max(current / total if total > 0 else 0, 0.0), 1.0),
                 text=f"Topics: {current}/{total}",
             )
+        elif tinfo.get("mode") == "GENERATION":
+            cc = tinfo.get("current_chunk_index", 0)
+            tc = tinfo.get("total_chunks", 0)
+            fc = tinfo.get("flashcards_count", 0)
+            percent = min(max(cc / tc if tc > 0 else 0, 0.0), 1.0)
+            st.progress(
+                percent,
+                text=f"Chunk {cc}/{tc} · {fc} card(s) · {tinfo.get('status_message', 'Processing...')}",
+            )
         else:
             tp = tinfo.get("total_pages", 1)
             cp = tinfo.get("current_page", 0)
@@ -88,6 +97,13 @@ def _study_materials_monitor():
                     percent = min(max(curr / total if total > 0 else 0, 0.0), 1.0)
                     col_t.markdown(f"**🌐 Researching: {display_name}**")
                     col_t.progress(percent, text=f"Page {curr} / {total} · {fc} flashcard(s) generated")
+                elif task.get("mode") == "GENERATION":
+                    cc = task.get("current_chunk_index", 0)
+                    tc = task.get("total_chunks", 0)
+                    fc = task.get("flashcards_count", 0)
+                    percent = min(max(cc / tc if tc > 0 else 0, 0.0), 1.0)
+                    col_t.markdown(f"**🧠 Generating: {display_name}**")
+                    col_t.progress(percent, text=f"Chunk {cc} / {tc} · {fc} card(s) · {task.get('status_message', 'Processing...')}")
                 else:
                     tp = task.get("total_pages", 1)
                     cp = task.get("current_page", 0)
@@ -95,7 +111,7 @@ def _study_materials_monitor():
                     tc = task.get("chunks_in_page", 1)
                     chunk_progress = cc / tc if tc > 0 else 0
                     percent = min(max((cp + chunk_progress) / tp if tp > 0 else 0, 0.0), 1.0)
-                    col_t.markdown(f"**⏳ Processing: {display_name}**")
+                    col_t.markdown(f"**⏳ Indexing: {display_name}**")
                     col_t.progress(percent, text=f"Page {cp+1}/{tp}: {task.get('status_message', 'Processing...')}")
 
                 if col_b.button("⏹️ Stop", key=f"stop_{d_id}"):
@@ -103,8 +119,14 @@ def _study_materials_monitor():
                     st.rerun()
 
             elif task["status"] == "completed":
-                icon = "🌐" if is_web else "✅"
-                col_t.success(f"{icon} **Completed**: {display_name}")
+                if is_web:
+                    icon = "🌐"
+                    col_t.success(f"{icon} **Completed**: {display_name}")
+                elif task.get("mode") == "GENERATION":
+                    fc = task.get("flashcards_count", 0)
+                    col_t.success(f"✅ **Completed**: {display_name} — {fc} card(s) generated")
+                else:
+                    col_t.success(f"✅ **Completed**: {display_name}")
                 if col_b.button("✖ Clear", key=f"clear_{d_id}"):
                     clear_background_task(d_id)
                     st.rerun()

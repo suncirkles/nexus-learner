@@ -8,7 +8,7 @@ Moved verbatim from app.py — zero behaviour change.
 import streamlit as st
 
 
-@st.fragment(run_every=2)
+@st.fragment(run_every=5)
 def _sidebar_monitor():
     """Module-level fragment — stable identity lets run_every fire reliably."""
     from core.background import background_tasks, stop_background_task, _lock as _bg_lock
@@ -61,8 +61,7 @@ def _sidebar_monitor():
             stop_background_task(tid)
             if tinfo["status"] == "failed":
                 from core.background import background_tasks as bt
-                del bt[tid]
-            st.rerun()
+                bt.pop(tid, None)
 
 
 def render_sidebar_background_monitor():
@@ -70,7 +69,7 @@ def render_sidebar_background_monitor():
     _sidebar_monitor()
 
 
-@st.fragment(run_every=2)
+@st.fragment(run_every=5)
 def _study_materials_monitor():
     """Module-level fragment — stable identity lets run_every fire reliably."""
     from core.background import background_tasks, stop_background_task, clear_background_task, _lock as _bg_lock
@@ -116,7 +115,6 @@ def _study_materials_monitor():
 
                 if col_b.button("⏹️ Stop", key=f"stop_{d_id}"):
                     stop_background_task(d_id)
-                    st.rerun()
 
             elif task["status"] == "completed":
                 if is_web:
@@ -129,19 +127,16 @@ def _study_materials_monitor():
                     col_t.success(f"✅ **Completed**: {display_name}")
                 if col_b.button("✖ Clear", key=f"clear_{d_id}"):
                     clear_background_task(d_id)
-                    st.rerun()
 
             elif task["status"] == "stopped":
                 col_t.warning(f"⏹️ **Stopped**: {display_name}")
                 if col_b.button("✖ Clear", key=f"clear_{d_id}"):
                     clear_background_task(d_id)
-                    st.rerun()
 
             elif task["status"] == "failed":
                 col_t.error(f"❌ **Failed**: {display_name} — {task.get('error', 'Unknown Error')}")
                 if col_b.button("✖ Clear", key=f"clear_{d_id}"):
                     clear_background_task(d_id)
-                    st.rerun()
 
 
 def render_study_materials_background_monitor():

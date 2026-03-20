@@ -248,10 +248,16 @@ def render_flashcard_review_card(fc: dict, current_status: str):
             if st.button("💡 Get Suggested Answer", key=f"get_sug_{fc_id}"):
                 from agents.socratic import SocraticAgent
                 s_agent = SocraticAgent()
-                with st.spinner("LLM is thinking..."):
-                    suggestion = s_agent.suggest_answer(fc_question, fc_id)
-                    st.session_state[feedback_key] = f"Suggested Answer: {suggestion}"
-                    st.rerun()
+                try:
+                    with st.spinner("LLM is thinking..."):
+                        suggestion = s_agent.suggest_answer(fc_question, fc_id)
+                    suggestion_text = f"Suggested Answer: {suggestion}"
+                    st.session_state[feedback_key] = suggestion_text
+                    # Must update the text area's own widget key so Streamlit
+                    # reflects the new value (it ignores `value=` when key already exists).
+                    st.session_state[f"actual_fb_{fc_id}"] = suggestion_text
+                except Exception as _e:
+                    st.error(f"Could not get suggestion: {_e}")
 
             feedback = st.text_area("What needs to be fixed?", value=st.session_state[feedback_key], key=f"actual_fb_{fc_id}")
             if st.button("Regenerate Flashcard", key=f"fb_btn_{fc_id}"):

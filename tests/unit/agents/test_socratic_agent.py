@@ -147,7 +147,7 @@ class TestSocraticAgentLegacyChunkArg:
         mock_chain = MagicMock()
         captured_calls = []
 
-        def side_effect(args):
+        def side_effect(args, **kwargs):
             captured_calls.append(args["text"])
             return _make_output()
 
@@ -165,7 +165,7 @@ class TestSocraticAgentLegacyChunkArg:
         mock_chain = MagicMock()
         captured_calls = []
 
-        def side_effect(args):
+        def side_effect(args, **kwargs):
             captured_calls.append(args["text"])
             return _make_output()
 
@@ -183,7 +183,7 @@ class TestSocraticAgentLegacyChunkArg:
         mock_chain = MagicMock()
         captured_calls = []
 
-        def side_effect(args):
+        def side_effect(args, **kwargs):
             captured_calls.append(args["text"])
             return _make_output()
 

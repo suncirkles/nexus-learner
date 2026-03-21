@@ -192,6 +192,9 @@ class TestMentorLazyLoad:
                 render_mentor_review()
 
             at = AppTest.from_function(app)
+            # Navigate to Review Bin — radio-based tab nav only renders the
+            # selected section, so we must seed the state before running.
+            at.session_state["mentor_tab"] = "Review Bin"
             at.run()
 
         assert not at.exception, f"Mentor review bin raised: {at.exception}"

@@ -273,18 +273,13 @@ class TestMentorCardBrowsing:
         at = AppTest.from_function(_mentor_app, default_timeout=30)
         with patch.object(_api, "list_active_subjects", return_value=_SUBJECTS), \
              patch.object(_api, "get_topic_tree", return_value=_TOPIC_TREE), \
-             patch.object(_api, "get_subjects_with_stats", return_value=_SUBJECTS), \
-             patch.object(_api, "get_global_flashcard_stats", return_value=_GLOBAL_STATS), \
              patch.object(_api, "get_flashcards_by_subtopic",
                          side_effect=lambda sub_id, status, **kw: (
                              _PENDING_CARDS if status == "pending" else
                              _APPROVED_CARDS if status == "approved" else []
                          )), \
              patch.object(_api, "get_chunk_sources_batch", return_value=_SOURCES_BATCH), \
-             patch.object(_api, "get_chunk_source",
-                         return_value=_SOURCES_BATCH.get("55")), \
-             patch.object(_api, "bulk_approve_flashcards", return_value={"approved": 0}), \
-             patch.object(_api, "bulk_reject_flashcards", return_value={"rejected": 0}):
+             patch.object(_api, "get_chunk_source", return_value=_SOURCES_BATCH.get("55")):
             at.run()
         return at
 
@@ -293,17 +288,13 @@ class TestMentorCardBrowsing:
         at = AppTest.from_function(_mentor_app, default_timeout=30)
         with patch.object(_api, "list_active_subjects", return_value=_SUBJECTS), \
              patch.object(_api, "get_topic_tree", return_value=_TOPIC_TREE), \
-             patch.object(_api, "get_subjects_with_stats", return_value=_SUBJECTS), \
-             patch.object(_api, "get_global_flashcard_stats", return_value=_GLOBAL_STATS), \
              patch.object(_api, "get_flashcards_by_subtopic",
                          side_effect=lambda sub_id, status, **kw: (
                              _PENDING_CARDS if status == "pending" else
                              _APPROVED_CARDS if status == "approved" else []
                          )), \
              patch.object(_api, "get_chunk_sources_batch", return_value=_SOURCES_BATCH), \
-             patch.object(_api, "get_chunk_source", return_value=_SOURCES_BATCH.get("55")), \
-             patch.object(_api, "bulk_approve_flashcards", return_value={"approved": 0}), \
-             patch.object(_api, "bulk_reject_flashcards", return_value={"rejected": 0}):
+             patch.object(_api, "get_chunk_source", return_value=_SOURCES_BATCH.get("55")):
             at.run()
         assert not at.exception, f"Mentor page raised: {at.exception}"
 
@@ -330,17 +321,13 @@ class TestMentorCardBrowsing:
              patch.object(bm_module, "_study_materials_monitor", spy_study), \
              patch.object(_api, "list_active_subjects", return_value=_SUBJECTS), \
              patch.object(_api, "get_topic_tree", return_value=_TOPIC_TREE), \
-             patch.object(_api, "get_subjects_with_stats", return_value=_SUBJECTS), \
-             patch.object(_api, "get_global_flashcard_stats", return_value=_GLOBAL_STATS), \
              patch.object(_api, "get_flashcards_by_subtopic",
                          side_effect=lambda sub_id, status, **kw: (
                              _PENDING_CARDS if status == "pending" else
                              _APPROVED_CARDS if status == "approved" else []
                          )), \
              patch.object(_api, "get_chunk_sources_batch", return_value=_SOURCES_BATCH), \
-             patch.object(_api, "get_chunk_source", return_value=_SOURCES_BATCH.get("55")), \
-             patch.object(_api, "bulk_approve_flashcards", return_value={"approved": 0}), \
-             patch.object(_api, "bulk_reject_flashcards", return_value={"rejected": 0}):
+             patch.object(_api, "get_chunk_source", return_value=_SOURCES_BATCH.get("55")):
             at.run()
 
         assert not at.exception, f"Mentor page raised: {at.exception}"

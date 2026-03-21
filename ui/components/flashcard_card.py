@@ -68,7 +68,12 @@ def _format_source_badge(src: dict | None) -> str:
 _PAGE_SIZE = 20
 
 
-def render_flashcard_list(sub_id, status="approved"):
+def render_flashcard_list(sub_id, status="approved", question_types: list | None = None):
+    """Render a paginated list of flashcards for a subtopic.
+
+    question_types: optional list of question type strings for client-side filtering.
+    The fetch is always unfiltered (consistent pagination); filtering is applied on display.
+    """
     page_key = f"fc_page_{sub_id}_{status}"
     if page_key not in st.session_state:
         st.session_state[page_key] = 0
@@ -76,24 +81,33 @@ def render_flashcard_list(sub_id, status="approved"):
 
     cache_key = f"fc_cache_{sub_id}_{status}_{page}"
     if cache_key not in st.session_state:
-        fcs = api_client.get_flashcards_by_subtopic(
-            sub_id, status, skip=page * _PAGE_SIZE, limit=_PAGE_SIZE
-        )
+        with st.spinner("Loading cards..."):
+            fcs = api_client.get_flashcards_by_subtopic(
+                sub_id, status, skip=page * _PAGE_SIZE, limit=_PAGE_SIZE
+            )
         st.session_state[cache_key] = fcs
     else:
         fcs = st.session_state[cache_key]
 
-    if not fcs and page == 0:
-        st.info("No flashcards found.")
+    # Apply client-side type filter if requested.
+    if question_types:
+        fcs_display = [fc for fc in fcs if fc.get("question_type") in question_types]
+        if len(fcs_display) < len(fcs):
+            st.caption(f"Showing {len(fcs_display)} of {len(fcs)} cards on this page (filter active).")
+    else:
+        fcs_display = fcs
+
+    if not fcs_display and page == 0:
+        st.info("No flashcards found." if not question_types else "No cards match the selected filter on this page.")
         return
 
     # Batch fetch all chunk sources in one call.
-    chunk_ids = [fc["chunk_id"] for fc in fcs if fc.get("chunk_id")]
+    chunk_ids = [fc["chunk_id"] for fc in fcs_display if fc.get("chunk_id")]
     sources_map: dict = {}
     if chunk_ids:
         sources_map = api_client.get_chunk_sources_batch(chunk_ids)
 
-    for fc in fcs:
+    for fc in fcs_display:
         if status == "approved":
             src = sources_map.get(str(fc.get("chunk_id"))) if fc.get("chunk_id") else None
             source_attr = _format_source_attribution(src)

@@ -35,6 +35,7 @@ def run_document_generation(state: Dict[str, Any], doc_id: str, stop_event: thre
     file_path = state.get("file_path")
     try:
         logger.info(f"Background thread started for Document: {doc_id} ({filename})")
+        logger.debug("[BG:%s] thread alive, overwriting pre-registration entry", doc_id)
         with _lock:
             background_tasks[doc_id] = {
                 "status": "processing",
@@ -94,8 +95,10 @@ def run_document_generation(state: Dict[str, Any], doc_id: str, stop_event: thre
             background_tasks[doc_id]["status"] = "completed"
             background_tasks[doc_id]["status_message"] = "Task Complete!"
         logger.info(f"Background thread finished for Document: {doc_id}")
+        logger.debug("[BG:%s] status=completed", doc_id)
     except Exception as e:
         logger.error(f"Error in background generation for {doc_id}: {e}")
+        logger.debug("[BG:%s] status=failed error=%s", doc_id, e)
         with _lock:
             background_tasks[doc_id] = {"status": "failed", "error": str(e), "is_web": False}
     finally:
@@ -118,6 +121,25 @@ def start_background_task(state: Dict[str, Any], doc_id: str, filename: str = "U
     """Spawns a new thread for full PDF background generation."""
     stop_event = threading.Event()
     stop_events[doc_id] = stop_event
+    # Pre-register so the sidebar monitor can mount immediately on the next rerun,
+    # before the thread has a chance to write its own entry.
+    logger.debug("[BG:%s] pre-registered status=processing filename=%s", doc_id, filename)
+    with _lock:
+        background_tasks[doc_id] = {
+            "status": "processing",
+            "progress": 0,
+            "total": 1,
+            "filename": filename,
+            "mode": state.get("mode", "INDEXING"),
+            "is_web": False,
+            "status_message": "Initializing...",
+            "total_pages": 1,
+            "current_page": 0,
+            "current_chunk_index": 0,
+            "chunks_in_page": 1,
+            "total_chunks": 0,
+            "flashcards_count": 0,
+        }
     thread = threading.Thread(
         target=run_document_generation,
         args=(state, doc_id, stop_event, filename),
@@ -145,6 +167,7 @@ def run_web_research_background(
     set_request_id(task_id)
     set_session_id("background")
     logger.info("Web research background thread started: %s (%d topics)", task_id, len(topics))
+    logger.debug("[BG:%s] web thread alive", task_id)
     with _lock:
         background_tasks[task_id] = {
             "status": "processing",
@@ -214,9 +237,11 @@ def run_web_research_background(
         with _lock:
             background_tasks[task_id]["status"] = "completed"
         logger.info("Web research background thread finished: %s", task_id)
+        logger.debug("[BG:%s] status=completed", task_id)
 
     except Exception as exc:
         logger.error("Error in web research background task %s: %s", task_id, exc)
+        logger.debug("[BG:%s] status=failed error=%s", task_id, exc)
         with _lock:
             background_tasks[task_id] = {
                 "status": "failed",
@@ -235,6 +260,17 @@ def start_web_background_task(
     """Spawns a daemon thread for web research background processing."""
     stop_event = threading.Event()
     stop_events[task_id] = stop_event
+    # Pre-register so the sidebar monitor can mount immediately on the next rerun.
+    logger.debug("[BG:%s] web pre-registered status=processing subject=%s topics=%d", task_id, subject_name, len(topics))
+    with _lock:
+        background_tasks[task_id] = {
+            "status": "processing",
+            "pages_current": 0,
+            "pages_total": len(topics),
+            "flashcards_count": 0,
+            "display_name": f"Web Research — {subject_name}",
+            "is_web": True,
+        }
     thread = threading.Thread(
         target=run_web_research_background,
         args=(topics, subject_id, subject_name, task_id, stop_event),
@@ -246,15 +282,18 @@ def start_web_background_task(
 
 def stop_background_task(doc_id: str):
     """Signals a background thread (PDF or web) to stop."""
+    logger.debug("[BG:%s] stop requested", doc_id)
     with _lock:
         if doc_id in stop_events:
             stop_events[doc_id].set()
             if doc_id in background_tasks:
                 background_tasks[doc_id]["status"] = "stopped"
+                logger.debug("[BG:%s] status=stopped", doc_id)
 
 
 def clear_background_task(task_id: str):
     """Removes a completed/stopped/failed task from the registry under the lock."""
+    logger.debug("[BG:%s] cleared from registry", task_id)
     with _lock:
         background_tasks.pop(task_id, None)
         stop_events.pop(task_id, None)

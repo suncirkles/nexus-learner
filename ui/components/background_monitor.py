@@ -5,7 +5,10 @@ Background task monitor fragment for the sidebar and study materials page.
 Moved verbatim from app.py — zero behaviour change.
 """
 
+import logging
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 
 @st.fragment(run_every=5)
@@ -19,6 +22,11 @@ def _sidebar_monitor():
             for tid, task in background_tasks.items()
             if task.get("status") in ["processing", "failed"]
         }
+    logger.debug(
+        "[FRAG:sidebar] fired — active=%d all_tasks=%s",
+        len(active_tasks),
+        {tid: t.get("status") for tid, t in active_tasks.items()},
+    )
     if not active_tasks:
         return
 
@@ -72,10 +80,9 @@ def render_sidebar_background_monitor():
     """
     from core.background import background_tasks, _lock as _bg_lock
     with _bg_lock:
-        has_active = any(
-            t.get("status") in ("processing", "failed")
-            for t in background_tasks.values()
-        )
+        snapshot = {tid: t.get("status") for tid, t in background_tasks.items()}
+        has_active = any(s in ("processing", "failed") for s in snapshot.values())
+    logger.debug("[GATE:sidebar] has_active=%s tasks=%s", has_active, snapshot)
     if has_active:
         _sidebar_monitor()
 
@@ -87,6 +94,11 @@ def _study_materials_monitor():
 
     with _bg_lock:
         tasks_snapshot = dict(background_tasks)
+    logger.debug(
+        "[FRAG:study] fired — total=%d tasks=%s",
+        len(tasks_snapshot),
+        {tid: t.get("status") for tid, t in tasks_snapshot.items()},
+    )
     if not tasks_snapshot:
         return
 
@@ -158,6 +170,8 @@ def render_study_materials_background_monitor():
     """
     from core.background import background_tasks, _lock as _bg_lock
     with _bg_lock:
-        has_any = bool(background_tasks)
+        snapshot = {tid: t.get("status") for tid, t in background_tasks.items()}
+        has_any = bool(snapshot)
+    logger.debug("[GATE:study] has_any=%s tasks=%s", has_any, snapshot)
     if has_any:
         _study_materials_monitor()

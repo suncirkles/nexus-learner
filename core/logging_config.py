@@ -22,6 +22,22 @@ from pathlib import Path
 from core.context import get_request_id, get_session_id
 
 
+class _SuppressWebSocketClosed(logging.Filter):
+    """Suppress asyncio noise from Tornado WebSocket close events during page navigation."""
+    _keywords = ("WebSocketClosedError", "StreamClosedError", "Stream is closed")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return not any(kw in msg for kw in self._keywords)
+
+
+def _ensure_ws_filter() -> None:
+    """Attach the WebSocket-close filter to the asyncio logger (idempotent)."""
+    asyncio_logger = logging.getLogger("asyncio")
+    if not any(isinstance(f, _SuppressWebSocketClosed) for f in asyncio_logger.filters):
+        asyncio_logger.addFilter(_SuppressWebSocketClosed())
+
+
 class ContextFilter(logging.Filter):
     """Filter that injects context IDs (request_id, session_id) into log records."""
     def filter(self, record):
@@ -45,14 +61,23 @@ def setup_logging() -> None:
     from core.config import settings  # late import avoids circular deps
 
     root_logger = logging.getLogger()
+    numeric_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+
+    # Always suppress WebSocketClosedError / StreamClosedError noise from asyncio.
+    # These are Tornado fire-and-forget write tasks that fail when the browser
+    # closes the WebSocket during normal page navigation.  Streamlit reconnects
+    # automatically — the errors are harmless but flood the log on every nav event.
+    _ensure_ws_filter()
 
     # Idempotency guard — don't add duplicate handlers on Streamlit hot-reload
     if root_logger.handlers:
-        # Handlers already configured; just ensure level is current
-        root_logger.setLevel(settings.LOG_LEVEL.upper())
+        # Handlers already configured; update level on root and all handlers
+        # so that changing LOG_LEVEL in config.py takes effect on hot-reload.
+        root_logger.setLevel(numeric_level)
+        for handler in root_logger.handlers:
+            handler.setLevel(numeric_level)
         return
 
-    numeric_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
     root_logger.setLevel(numeric_level)
 
     # Updated format string to include req and sess IDs
@@ -88,6 +113,7 @@ def setup_logging() -> None:
     # Silence overly chatty third-party loggers at WARNING+
     for noisy in ("httpx", "httpcore", "openai", "anthropic", "langchain", "urllib3"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
 
     root_logger.info(
         "Logging initialised — level=%s file=%s",

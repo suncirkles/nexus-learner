@@ -253,7 +253,7 @@ def render_mentor_review():
     # Session-state radio instead of st.tabs — only the selected section's
     # code runs on each rerun, preventing spurious widget-tree work.
     section = st.radio(
-        "",
+        "Section",
         ["Pending Review", "Approved", "Review Bin"],
         horizontal=True,
         key="mentor_tab",

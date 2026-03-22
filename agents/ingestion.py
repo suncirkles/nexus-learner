@@ -1,9 +1,16 @@
 """
 agents/ingestion.py
 --------------------
-Handles document ingestion: PDF text extraction (with OCR fallback),
-content hashing for duplicate detection, text chunking, relational DB
-persistence, and vector embedding into Qdrant.
+Responsibility: Extract raw text from documents (PDF via PyMuPDF, OCR fallback via
+Tesseract), split into chunks, deduplicate via content hash, persist to the relational
+DB, and embed chunks into Qdrant.
+
+Do Not:
+- Classify, label, or assign topic/subtopic information to chunks (TopicAssignerAgent).
+- Generate flashcards or evaluate content quality (SocraticAgent / CriticAgent).
+- Scrape or fetch content from URLs (WebResearcherAgent).
+- Make decisions about whether a chunk is relevant to a study topic (RelevanceAgent).
+- Interpret the educational meaning of the text — treat it as opaque bytes to be stored.
 """
 
 import fitz  # PyMuPDF

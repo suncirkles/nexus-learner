@@ -9,12 +9,24 @@ import html as _html
 import os
 import json
 import logging
+import re
 from urllib.parse import urlparse
 import streamlit as st
 
 from ui import api_client
 
 logger = logging.getLogger(__name__)
+
+_UUID_PREFIX_RE = re.compile(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_',
+    re.IGNORECASE,
+)
+
+
+def _clean_filename(name: str) -> str:
+    """Strip UUID upload prefix (e.g. 'ab7dfbd0-..._') from a filename."""
+    return _UUID_PREFIX_RE.sub('', name)
+
 
 _QTYPE_DISPLAY = {
     "active_recall": "Active Recall",
@@ -42,9 +54,9 @@ def _format_source_attribution(src: dict | None) -> str:
         domain = urlparse(src["source_url"]).netloc.replace("www.", "")
         return f"🌐 {domain}"
     elif source_type == "image":
-        return f"🖼️ {src.get('filename') or 'image'}"
+        return f"🖼️ {_clean_filename(src.get('filename') or 'image')}"
     else:
-        return f"📄 {src.get('filename') or 'document'}"
+        return f"📄 {_clean_filename(src.get('filename') or 'document')}"
 
 
 def _format_source_badge(src: dict | None) -> str:
@@ -60,9 +72,9 @@ def _format_source_badge(src: dict | None) -> str:
             f"🌐 {domain}</a>"
         )
     elif source_type == "image":
-        return f"<span style='font-size:0.78rem; color:#8b949e;'>🖼️ {src.get('filename') or 'image'}</span>"
+        return f"<span style='font-size:0.78rem; color:#8b949e;'>🖼️ {_clean_filename(src.get('filename') or 'image')}</span>"
     else:
-        return f"<span style='font-size:0.78rem; color:#8b949e;'>📄 {src.get('filename') or 'document'}</span>"
+        return f"<span style='font-size:0.78rem; color:#8b949e;'>📄 {_clean_filename(src.get('filename') or 'document')}</span>"
 
 
 _PAGE_SIZE = 20

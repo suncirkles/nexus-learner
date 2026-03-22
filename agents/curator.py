@@ -1,15 +1,17 @@
 """
 agents/curator.py
 ------------------
-Content structuring agent. Analyzes raw text to produce a hierarchical
-Topic → Subtopic structure using LLM-powered extraction. Merges new
-content into existing Subject hierarchies, avoiding duplicate topics.
+Responsibility: Analyse raw text and extract a Topic → Subtopic hierarchy.
+Merges new topics into the existing subject structure passed in by the caller.
+Returns plain data — no DB reads or writes (caller persists via topic_repo).
 
-Phase 2b change: curate_structure() no longer queries the DB or writes topics.
-The caller is responsible for:
-  1. Pre-querying the existing topic hierarchy as a formatted string.
-  2. Calling topic_repo.get_or_create() / topic_repo.get_or_create_subtopic()
-     for each topic/subtopic returned by this method.
+Do Not:
+- Assign individual chunks to subtopics (TopicAssignerAgent's job).
+- Generate flashcards or evaluate card quality (SocraticAgent / CriticAgent).
+- Embed or store any text content (IngestionAgent).
+- Query or write the database directly; receive the existing hierarchy as input
+  and return the new structure for the caller to persist.
+- Invent topics that have no basis in the provided text; extraction only.
 """
 
 import logging

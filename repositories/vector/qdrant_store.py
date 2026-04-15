@@ -6,17 +6,17 @@ Consolidates the three QdrantVectorStore.from_documents() call sites
 (agents/ingestion.py, workflows/phase1_ingestion.py, workflows/phase2_web_ingestion.py)
 into a single place.
 
-Also absorbs the direct QdrantClient.delete_collection() call that was
-previously in core/database.reset_database() and app.py.
+Implements VectorStoreProvider for dynamic backend switching.
 """
 
 import logging
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 from core.config import settings
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 from langchain_qdrant import QdrantVectorStore
+from repositories.protocols import VectorStoreProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ def _make_embeddings():
         )
 
 
-class QdrantStore:
+class QdrantStore(VectorStoreProtocol):
     """Unified interface for all Qdrant vector-store operations.
 
     Lazily initialises embeddings on first use so importing this module
@@ -83,7 +83,7 @@ class QdrantStore:
         self._init_embeddings()
         return self._embeddings
 
-    def upsert_chunks(self, chunks: List[dict]) -> None:
+    def upsert_chunks(self, chunks: List[Dict[str, Any]]) -> None:
         """Upsert a batch of chunks into Qdrant.
 
         Args:
@@ -144,7 +144,7 @@ class QdrantStore:
         query: str,
         top_k: int = 10,
         filter_doc_id: Optional[str] = None,
-    ) -> List[dict]:
+    ) -> List[Dict[str, Any]]:
         """Semantic search returning list of {"text": str, "metadata": dict, "score": float}."""
         self._init_embeddings()
 

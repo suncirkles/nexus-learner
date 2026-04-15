@@ -6,7 +6,6 @@ Moved verbatim from app.py — zero behaviour change.
 """
 
 import html as _html
-import os
 import json
 import logging
 import re
@@ -267,32 +266,24 @@ def _render_review_card_inner(fc: dict, current_status: str, src, cache_key: str
         except Exception:
             pass
 
-    if src:
-        page_num = src.get("page_number")
-        doc_id_for_img = src.get("document_id")
-        img_path = (
-            os.path.join("page_cache", f"{doc_id_for_img}_p{page_num:04d}.png")
-            if page_num is not None and doc_id_for_img
-            else None
-        )
-        has_image = img_path and os.path.exists(img_path)
-
-        if has_image:
-            import base64 as _b64
-            with open(img_path, "rb") as _f:
-                _img_b64 = _b64.b64encode(_f.read()).decode()
+    if src and fc_chunk_id and src.get("source_type") == "pdf":
+        page_img = api_client.get_chunk_page_image(fc_chunk_id)
+        if page_img and page_img.get("image_b64"):
+            _img_b64 = page_img["image_b64"]
+            page_num = page_img.get("page_number", src.get("page_number") or 0)
             st.markdown(
-                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Page</summary>"
+                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Page {page_num + 1}</summary>"
                 f"<img src='data:image/png;base64,{_img_b64}' "
-                f"style='width:100%; margin-top:8px; border-radius:4px;'/>"
-                f"<div style='font-size:0.75rem; color:#8b949e; margin-top:4px;'>"
-                f"Page {page_num + 1}</div></details>",
+                f"style='max-width:100%; height:auto; display:block; margin-top:8px; border-radius:4px;'/></details>",
                 unsafe_allow_html=True,
             )
         elif src.get("text"):
+            # PDF page image unavailable (file not on volume) — show text snippet
             snippet = src["text"][:1500] + ("…" if len(src["text"]) > 1500 else "")
+            pg = src.get("page_number")
+            pg_label = f" — Page {pg + 1}" if pg is not None else ""
             st.markdown(
-                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Snippet</summary>"
+                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Snippet{pg_label}</summary>"
                 f"<pre style='white-space:pre-wrap; font-size:0.8rem; margin-top:8px;'>"
                 f"{_html.escape(snippet)}</pre></details>",
                 unsafe_allow_html=True,
@@ -472,32 +463,24 @@ def render_flashcard_review_card(fc: dict, current_status: str, src=None):
         except Exception:
             pass
 
-    if src:
-        page_num = src.get("page_number")
-        doc_id_for_img = src.get("document_id")
-        img_path = (
-            os.path.join("page_cache", f"{doc_id_for_img}_p{page_num:04d}.png")
-            if page_num is not None and doc_id_for_img
-            else None
-        )
-        has_image = img_path and os.path.exists(img_path)
-
-        if has_image:
-            import base64 as _b64
-            with open(img_path, "rb") as _f:
-                _img_b64 = _b64.b64encode(_f.read()).decode()
+    if src and fc_chunk_id and src.get("source_type") == "pdf":
+        page_img = api_client.get_chunk_page_image(fc_chunk_id)
+        if page_img and page_img.get("image_b64"):
+            _img_b64 = page_img["image_b64"]
+            page_num = page_img.get("page_number", src.get("page_number") or 0)
             st.markdown(
-                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Page</summary>"
+                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Page {page_num + 1}</summary>"
                 f"<img src='data:image/png;base64,{_img_b64}' "
-                f"style='width:100%; margin-top:8px; border-radius:4px;'/>"
-                f"<div style='font-size:0.75rem; color:#8b949e; margin-top:4px;'>"
-                f"Page {page_num + 1}</div></details>",
+                f"style='max-width:100%; height:auto; display:block; margin-top:8px; border-radius:4px;'/></details>",
                 unsafe_allow_html=True,
             )
         elif src.get("text"):
+            # PDF page image unavailable (file not on volume) — show text snippet
             snippet = src["text"][:1500] + ("…" if len(src["text"]) > 1500 else "")
+            pg = src.get("page_number")
+            pg_label = f" — Page {pg + 1}" if pg is not None else ""
             st.markdown(
-                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Snippet</summary>"
+                f"<details><summary style='cursor:pointer; color:#58a6ff;'>📄 Source Snippet{pg_label}</summary>"
                 f"<pre style='white-space:pre-wrap; font-size:0.8rem; margin-top:8px;'>"
                 f"{_html.escape(snippet)}</pre></details>",
                 unsafe_allow_html=True,

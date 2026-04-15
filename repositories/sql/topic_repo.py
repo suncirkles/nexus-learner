@@ -7,9 +7,10 @@ Centralises topic/subtopic CRUD and the H6 cascade-delete invariant
 """
 
 import logging
+from datetime import datetime
 from typing import Dict, List, Optional
 from sqlalchemy import delete, func, update as sa_update
-from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, SubjectDocumentAssociation
+from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, SubjectDocumentAssociation, SubjectTopicAssociation
 
 logger = logging.getLogger(__name__)
 
@@ -130,19 +131,46 @@ class TopicRepo:
         return preserved_count
 
     def get_by_subject(self, subject_id: int) -> List[dict]:
-        """Return all topics for a subject via SubjectDocumentAssociation."""
+        """Return all topics for a subject.
+
+        Primary path: SubjectTopicAssociation (explicit, direct).
+        Fallback: SubjectDocumentAssociation → Document → Topic (legacy).
+        Both paths are unioned so data created before the explicit table exists
+        is still visible.
+        """
         with SessionLocal() as db:
-            topics = (
+            # Primary: explicit subject↔topic table
+            via_sta = (
+                db.query(Topic)
+                .join(SubjectTopicAssociation, Topic.id == SubjectTopicAssociation.topic_id)
+                .filter(SubjectTopicAssociation.subject_id == subject_id)
+                .all()
+            )
+            seen_ids = {t.id for t in via_sta}
+
+            # Fallback: legacy path via document association (catches pre-migration data)
+            via_sda = (
                 db.query(Topic)
                 .join(SubjectDocumentAssociation, Topic.document_id == SubjectDocumentAssociation.document_id)
                 .filter(SubjectDocumentAssociation.subject_id == subject_id)
-                .order_by(Topic.created_at.desc())
+                .filter(Topic.id.notin_(seen_ids))
                 .all()
             )
-            return [_topic_to_dict(t) for t in topics]
 
-    def get_subtopics_for_topic_ids(self, topic_ids: List[int]) -> Dict[int, List[dict]]:
+            all_topics = via_sta + via_sda
+            all_topics.sort(key=lambda t: t.created_at or datetime.min, reverse=True)
+            return [_topic_to_dict(t) for t in all_topics]
+
+    def get_subtopics_for_topic_ids(
+        self,
+        topic_ids: List[int],
+        subject_id: Optional[int] = None,
+    ) -> Dict[int, List[dict]]:
         """Single query: fetch all subtopics (with card counts) for multiple topic IDs.
+
+        subject_id: when provided, card counts are filtered to that subject only.
+        This prevents cards from other subjects inflating/deflating the counts shown
+        in mentor review and ensures the correct subject→topic→subtopic→flashcard chain.
 
         Returns {topic_id: [subtopic_dict, ...]}.
         """
@@ -155,12 +183,13 @@ class TopicRepo:
 
             subtopic_ids = [s.id for s in subs]
             counts: Dict[int, Dict[str, int]] = {}
-            rows = (
+            card_q = (
                 db.query(Flashcard.subtopic_id, Flashcard.status, func.count(Flashcard.id))
                 .filter(Flashcard.subtopic_id.in_(subtopic_ids))
-                .group_by(Flashcard.subtopic_id, Flashcard.status)
-                .all()
             )
+            if subject_id is not None:
+                card_q = card_q.filter(Flashcard.subject_id == subject_id)
+            rows = card_q.group_by(Flashcard.subtopic_id, Flashcard.status).all()
             for sub_id, status, count in rows:
                 if sub_id not in counts:
                     counts[sub_id] = {"approved": 0, "pending": 0}

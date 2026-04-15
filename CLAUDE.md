@@ -15,7 +15,7 @@ cp .env.example .env  # Fill in API keys
 docker-compose up -d
 
 # Run the FastAPI service layer (required — start before Streamlit)
-uvicorn api.main:app --host 127.0.0.1 --port 8000 --reload
+uvicorn api.app:app --host 127.0.0.1 --port 8000 --reload
 
 # Run the Streamlit frontend (in a second terminal)
 streamlit run app.py
@@ -41,8 +41,8 @@ Streamlit pages
     → ui/api_client.py   (httpx, persistent connection pool)
     → FastAPI (port 8000)
     → Services           (business logic)
-    → Repositories       (SQL + Qdrant)
-    → SQLite / Qdrant
+    → Repositories       (SQL + Vector factory)
+    → SQLite / PGVector / Qdrant
 ```
 
 All Streamlit pages communicate exclusively through `ui/api_client.py`. No page imports `core.database` or calls services directly.
@@ -74,7 +74,7 @@ All Streamlit pages communicate exclusively through `ui/api_client.py`. No page 
 |---|---|---|
 | Services | `services/` | Business logic — `SubjectService`, `TopicService`, `FlashcardService` |
 | SQL Repos | `repositories/sql/` | SQLAlchemy queries — one file per table |
-| Vector Repo | `repositories/vector/qdrant_store.py` | Qdrant upsert / delete / search |
+| Vector Repo | `repositories/vector/factory.py` | Dynamic provider switching (Qdrant / PGVector) |
 | FastAPI routers | `api/routers/` | REST endpoints; `subjects`, `topics`, `flashcards`, `library`, `system` |
 | Schemas | `api/schemas.py` | Pydantic request/response models |
 | DI | `api/dependencies.py` | FastAPI `Depends()` factories for services and repos |
@@ -89,8 +89,8 @@ All Streamlit pages communicate exclusively through `ui/api_client.py`. No page 
 
 ### Data Storage
 
-- **SQLite** (`nexus_v3.db`) — Relational data (subjects, topics, flashcards, etc.)
-- **Qdrant** (Docker, port 6333) — Vector embeddings of content chunks for semantic search
+- **PostgreSQL** (Supabase) — Relational data (subjects, topics, flashcards, etc.) AND vector storage if `pgvector` enabled.
+- **Qdrant** (Docker, port 6333) — Alternative vector store for semantic search/cache.
 - **Redis** (optional, port 6379, db 1) — Persistent semantic cache backend
 
 ### Flashcard Lifecycle
@@ -119,4 +119,6 @@ Set `LANGCHAIN_TRACING_V2=true` and `LANGCHAIN_API_KEY` in `.env` to enable trac
 | `SEMANTIC_CACHE_BACKEND` | `qdrant` | `qdrant` or `redis` |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection (used when backend=redis) |
 | `REDIS_CACHE_DB` | `1` | Redis DB index for cache |
+| `VECTOR_STORE_TYPE` | `qdrant` | `qdrant` or `pgvector` |
+| `PGVECTOR_COLLECTION_NAME` | `nexus_vectors` | Table name for PGVector storage |
 | `API_BASE_URL` | `http://127.0.0.1:8000` | FastAPI base URL used by Streamlit |

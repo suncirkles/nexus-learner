@@ -3,11 +3,11 @@ core/database.py
 -----------------
 SQLAlchemy ORM models and database session management.
 Defines the relational schema for Subjects, Documents, Topics,
-Subtopics, and Flashcards. Uses SQLite for the MVP.
+Subtopics, and Flashcards.
 """
 
 from contextlib import contextmanager
-from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, ForeignKey, text
+from sqlalchemy import create_engine, Column, Integer, String, Text, Boolean, DateTime, ForeignKey, text, inspect, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 from datetime import datetime, timezone
 from .config import settings
@@ -17,19 +17,16 @@ logger = logging.getLogger(__name__)
 
 # --- Engine & Session Factory ---
 
-engine = create_engine(settings.DB_URL, connect_args={"check_same_thread": False})
+# Standard SQLAlchemy engine creation. DB_URL should point to a PostgreSQL instance (Supabase).
+engine = create_engine(settings.DB_URL)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
 @contextmanager
 def get_session():
-    """Context manager for safe database session usage.
-    
-    Usage:
-        with get_session() as db:
-            db.query(Subject).all()
-    """
+    """Context manager for safe database session usage."""
     db = SessionLocal()
     try:
         yield db
@@ -37,16 +34,41 @@ def get_session():
         db.close()
 
 
+
 # --- Bridge Tables ---
 
 class SubjectDocumentAssociation(Base):
     """Many-to-Many link between Subjects and Documents."""
     __tablename__ = "subject_document_association"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
     document_id = Column(String, ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class SubjectTopicAssociation(Base):
+    """Explicit Many-to-Many link between Subjects and Topics.
+
+    A topic discovered in a document can be studied by multiple subjects.
+    This table is the authoritative source for which topics belong to which
+    subject, making subject→topic→subtopic→flashcard a fully explicit chain.
+
+    Populated/refreshed at the start of each GENERATION run so that stale
+    topic associations are cleared and current ones are guaranteed present
+    before any flashcard FK check.
+    """
+    __tablename__ = "subject_topic_association"
+
+    id = Column(Integer, primary_key=True, index=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
+    topic_id = Column(Integer, ForeignKey("topics.id", ondelete="CASCADE"), index=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    __table_args__ = (
+        UniqueConstraint("subject_id", "topic_id", name="uq_subject_topic"),
+    )
+
 
 # --- ORM Models ---
 
@@ -119,6 +141,7 @@ class Topic(Base):
     # Relationships
     document = relationship("Document", back_populates="topics")
     subtopics = relationship("Subtopic", back_populates="topic", cascade="all, delete-orphan")
+    flashcards = relationship("Flashcard", back_populates="topic")
 
 
 class Subtopic(Base):
@@ -144,7 +167,7 @@ class BatchJob(Base):
     anthropic_batch_id = Column(String, nullable=True, index=True)     # set after submit
     subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
     status = Column(String(20), default="indexing")
-    # enum: "indexing" | "submitted" | "collecting" | "completed" | "failed"
+    # enum: "indexing" | "generating" | "submitted" | "collecting" | "completed" | "failed"
     doc_ids = Column(Text)           # JSON list of document UUIDs
     question_types = Column(Text)    # JSON list of question type strings
     request_count = Column(Integer, default=0)
@@ -153,6 +176,15 @@ class BatchJob(Base):
     submitted_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    # Progress tracking columns (written by the Modal worker; read by the UI via API poll)
+    filename = Column(Text, nullable=True)
+    status_message = Column(Text, nullable=True)
+    total_pages = Column(Integer, default=0)
+    current_page = Column(Integer, default=0)
+    total_chunks = Column(Integer, default=0)
+    current_chunk_index = Column(Integer, default=0)
+    flashcards_count = Column(Integer, default=0)
 
     subject = relationship("Subject")
     requests = relationship("BatchRequest", back_populates="job", cascade="all, delete-orphan")
@@ -180,6 +212,10 @@ class Flashcard(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     subject_id = Column(Integer, ForeignKey("subjects.id", ondelete="CASCADE"), index=True)
+    # Full hierarchy stored explicitly: subject → topic → subtopic → flashcard
+    # This makes mentor-review queries direct and avoids the
+    # SubjectDocumentAssociation→Document→Topic→Subtopic join for card counts.
+    topic_id = Column(Integer, ForeignKey("topics.id", ondelete="SET NULL"), nullable=True, index=True)
     subtopic_id = Column(Integer, ForeignKey("subtopics.id", ondelete="CASCADE"), index=True)
     chunk_id = Column(Integer, nullable=True)  # Link to ContentChunk ID for reference
     
@@ -209,11 +245,12 @@ class Flashcard(Base):
 
     # Relationships
     subject = relationship("Subject", back_populates="flashcards")
+    topic = relationship("Topic", back_populates="flashcards")
     subtopic = relationship("Subtopic", back_populates="flashcards")
 
 
-# Create tables (no-op if they already exist)
-Base.metadata.create_all(bind=engine)
+# Create tables (checkfirst=True makes this a true no-op if tables exist)
+Base.metadata.create_all(bind=engine, checkfirst=True)
 
 
 _migrations_done = False
@@ -221,55 +258,64 @@ _migrations_done = False
 
 def _run_migrations():
     """Adds new columns/tables to an existing database without dropping data.
-
-    Safe to call on both fresh and legacy databases. Uses PRAGMA table_info
-    to detect missing columns before issuing ALTER TABLE.
+    
+    Dialect-agnostic using SQLAlchemy Inspect. Safe for both SQLite and Postgres.
     """
     global _migrations_done
     if _migrations_done:
         return
     _migrations_done = True
-    with engine.connect() as conn:
-        def column_exists(table: str, column: str) -> bool:
-            rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
-            return any(row[1] == column for row in rows)
 
-        def table_exists(table: str) -> bool:
-            row = conn.execute(
-                text("SELECT name FROM sqlite_master WHERE type='table' AND name=:t"),
-                {"t": table}
-            ).fetchone()
-            return row is not None
+    try:
+        inspector = inspect(engine)
+        existing_tables = inspector.get_table_names()
+    except Exception as e:
+        logger.warning(f"Could not inspect database for migrations: {e}")
+        return
 
-        migrations = [
-            # New metric columns on documents
-            ("documents", "relevance_rate",    "INTEGER NOT NULL DEFAULT 0"),
-            ("documents", "yield_rate",         "INTEGER NOT NULL DEFAULT 0"),
-            ("documents", "faithfulness_score", "INTEGER NOT NULL DEFAULT 0"),
-            # Flashcards now carry a direct subject FK
-            ("flashcards", "subject_id", "INTEGER REFERENCES subjects(id) ON DELETE CASCADE"),
-            # Chunks are now assigned to a specific subtopic
-            ("content_chunks", "subtopic_id", "INTEGER REFERENCES subtopics(id) ON DELETE SET NULL"),
-            # Page provenance for source image rendering
-            ("content_chunks", "page_number", "INTEGER"),
-            # Topics are now owned by a document, not a subject
-            ("topics", "document_id", "VARCHAR REFERENCES documents(id) ON DELETE CASCADE"),
-            # Phase 2.5: atomic content columns on flashcards
-            ("flashcards", "question_type",        "VARCHAR(30) NOT NULL DEFAULT 'active_recall'"),
-            ("flashcards", "complexity_level",     "VARCHAR(10)"),
-            ("flashcards", "rubric",               "TEXT"),
-            ("flashcards", "critic_rubric_scores", "TEXT"),
-        ]
+    migrations = [
+        # New metric columns on documents
+        ("documents", "relevance_rate",    "INTEGER NOT NULL DEFAULT 0"),
+        ("documents", "yield_rate",         "INTEGER NOT NULL DEFAULT 0"),
+        ("documents", "faithfulness_score", "INTEGER NOT NULL DEFAULT 0"),
+        # Flashcards now carry a direct subject FK
+        ("flashcards", "subject_id", "INTEGER REFERENCES subjects(id) ON DELETE CASCADE"),
+        # Chunks are now assigned to a specific subtopic
+        ("content_chunks", "subtopic_id", "INTEGER REFERENCES subtopics(id) ON DELETE SET NULL"),
+        # Page provenance for source image rendering
+        ("content_chunks", "page_number", "INTEGER"),
+        # Topics are now owned by a document, not a subject
+        ("topics", "document_id", "VARCHAR REFERENCES documents(id) ON DELETE CASCADE"),
+        # Phase 2.5: atomic content columns on flashcards
+        ("flashcards", "question_type",        "VARCHAR(30) NOT NULL DEFAULT 'active_recall'"),
+        ("flashcards", "complexity_level",     "VARCHAR(10)"),
+        ("flashcards", "rubric",               "TEXT"),
+        ("flashcards", "critic_rubric_scores", "TEXT"),
+        # Full subject→topic→subtopic hierarchy stored on the flashcard for direct querying
+        ("flashcards", "topic_id", "INTEGER REFERENCES topics(id) ON DELETE SET NULL"),
+        # Explicit subject↔topic many-to-many (populated/refreshed each GENERATION run)
+        # NOTE: table creation is handled separately below (needs CREATE TABLE, not ALTER)
 
+        # Modal deployment: DB-backed progress so worker updates are visible across containers
+        ("batch_jobs", "filename",             "TEXT"),
+        ("batch_jobs", "status_message",       "TEXT"),
+        ("batch_jobs", "total_pages",          "INTEGER DEFAULT 0"),
+        ("batch_jobs", "current_page",         "INTEGER DEFAULT 0"),
+        ("batch_jobs", "total_chunks",         "INTEGER DEFAULT 0"),
+        ("batch_jobs", "current_chunk_index",  "INTEGER DEFAULT 0"),
+        ("batch_jobs", "flashcards_count",     "INTEGER DEFAULT 0"),
+    ]
+
+    with engine.begin() as conn:
         for table, column, col_def in migrations:
-            if table_exists(table) and not column_exists(table, column):
+            if table in existing_tables:
                 try:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}"))
-                    conn.commit()
-                    logger.info(f"Migration: added {table}.{column}")
+                    cols = [c["name"] for c in inspector.get_columns(table)]
+                    if column not in cols:
+                        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}"))
+                        logger.info(f"Migration: added {table}.{column}")
                 except Exception as e:
-                    conn.rollback()
-                    logger.warning(f"Migration skipped {table}.{column}: {e}")
+                    logger.warning(f"Migration failed for {table}.{column}: {e}")
 
 
 _run_migrations()

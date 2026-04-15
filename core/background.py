@@ -12,7 +12,6 @@ import os
 import threading
 import logging
 from typing import Dict, Any, List
-from workflows.phase1_ingestion import phase1_graph
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +28,9 @@ _lock = threading.Lock()
 
 def run_document_generation(state: Dict[str, Any], doc_id: str, stop_event: threading.Event, filename: str = "Unknown"):
     """Runs the full Phase 1 LangGraph workflow in a background thread."""
+    # Lazy import — keeps background.py importable without pulling in the full
+    # LangGraph + agents + core.database chain into the Streamlit process.
+    from workflows.phase1_ingestion import phase1_graph
     from core.context import set_request_id, set_session_id
     set_request_id(doc_id)
     set_session_id("background")
@@ -161,6 +163,7 @@ def run_web_research_background(
     stop_event: threading.Event,
 ):
     """Runs the Phase 2 web ingestion pipeline for remaining topics in a background thread."""
+    # Lazy import — same reasoning as run_document_generation above.
     from workflows.phase2_web_ingestion import phase2_graph
 
     from core.context import set_request_id, set_session_id

@@ -179,3 +179,30 @@ class ChunkSourceBatchRequest(BaseModel):
 class ChunkSourceBatchResponse(BaseModel):
     # str keys because JSON object keys are always strings
     sources: dict  # {str(chunk_id): FlashcardSourceResponse-compatible dict}
+
+
+# ---------------------------------------------------------------------------
+# Ingestion / Async Job schemas
+# ---------------------------------------------------------------------------
+
+class IngestionSpawnRequest(BaseModel):
+    mode: str = Field(..., pattern="^(INDEXING|GENERATION)$")
+    doc_id: str
+    subject_id: Optional[int] = None
+    question_type: str = "active_recall"
+    file_path: Optional[str] = None
+    target_topics: List[str] = []
+
+
+class IngestionStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    status_message: Optional[str] = None
+    error: Optional[str] = None
+    # Progress fields written by the worker, polled by the UI
+    filename: Optional[str] = None
+    total_pages: int = 0
+    current_page: int = 0
+    total_chunks: int = 0
+    current_chunk_index: int = 0
+    flashcards_count: int = 0

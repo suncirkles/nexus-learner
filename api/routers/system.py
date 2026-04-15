@@ -15,6 +15,6 @@ router = APIRouter(prefix="/system", tags=["system"])
 
 @router.post("/reset", response_model=ResetResponse)
 def reset_system(svc: SystemService = Depends(get_system_service)):
-    """Wipe all SQLite tables and the Qdrant collection."""
+    """Wipe all relational tables and the Qdrant collection."""
     svc.reset()
     return ResetResponse(status="ok", message="System reset complete.")

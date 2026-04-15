@@ -194,18 +194,18 @@ class CriticAgent:
         aggregate_score = _aggregate(acc, log, grd, cla)
         rubric_scores = {"accuracy": acc, "logic": log, "grounding": grd, "clarity": cla}
 
-        # Auto-reject rule 1: answer not traceable to source
-        # Auto-reject rule 2: phantom data reference (table/figure not embedded)
-        # Auto-reject rule 3: factually wrong or self-contradicting answer
-        # Auto-reject rule 4: broken or circular reasoning
-        should_reject = grd < 2 or cla < 2 or acc < 2 or log < 2
-        if grd < 2:
+        # Auto-reject: any dimension scoring strictly below the configured minimum.
+        # CRITIC_REJECT_MIN_SCORE=2 (default) → reject when any score = 1 (absolute minimum).
+        # CRITIC_REJECT_MIN_SCORE=1 → never auto-reject (all cards reach Pending Review).
+        _min = settings.CRITIC_REJECT_MIN_SCORE
+        should_reject = grd < _min or cla < _min or acc < _min or log < _min
+        if grd < _min:
             reject_reason = f"grounding_score={grd}/4"
-        elif cla < 2:
+        elif cla < _min:
             reject_reason = f"clarity_score={cla}/4 (phantom data reference)"
-        elif acc < 2:
+        elif acc < _min:
             reject_reason = f"accuracy_score={acc}/4 (factually wrong answer)"
-        elif log < 2:
+        elif log < _min:
             reject_reason = f"logic_score={log}/4 (broken or circular reasoning)"
         else:
             reject_reason = ""

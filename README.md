@@ -49,7 +49,7 @@ To enable full agent tracing in [LangSmith](https://smith.langchain.com/):
 - **LangChain** — LLM abstraction, embeddings
 - **FastAPI + uvicorn** — service layer REST API
 - **Streamlit** — frontend UI
-- **SQLAlchemy + SQLite** — relational data
+- **SQLAlchemy + PostgreSQL** — relational data
 - **Qdrant** — vector store (embeddings + semantic cache)
 - **Redis** — optional persistent semantic cache backend
 - **PyMuPDF + Tesseract** — PDF and image extraction
@@ -168,7 +168,7 @@ PYTHONPATH=. pytest tests/ -v          # all tests (requires API keys)
 - **LangChain** — LLM abstraction, embeddings
 - **FastAPI + uvicorn** — service layer REST API
 - **Streamlit** — frontend UI
-- **SQLAlchemy + SQLite** — relational data
+- **SQLAlchemy + PostgreSQL** — relational data
 - **Qdrant** — vector store (embeddings + semantic cache)
 - **Redis** — optional persistent semantic cache backend
 - **PyMuPDF + Tesseract** — PDF and image extraction

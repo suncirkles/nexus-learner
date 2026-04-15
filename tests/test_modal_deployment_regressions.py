@@ -208,6 +208,7 @@ def test_extract_hierarchy_is_noop_for_generation_mode():
 
 def test_modal_worker_signature_includes_question_type():
     """run_ingestion_background must accept question_type as a named parameter."""
+    modal = pytest.importorskip("modal", reason="modal package not installed locally")
     import modal_app
     sig = inspect.signature(modal_app.run_ingestion_background.raw_f
                             if hasattr(modal_app.run_ingestion_background, "raw_f")
@@ -220,6 +221,7 @@ def test_modal_worker_signature_includes_question_type():
 
 def test_modal_worker_question_type_default_is_active_recall():
     """Default value for question_type must be 'active_recall' (backward-compat)."""
+    modal = pytest.importorskip("modal", reason="modal package not installed locally")
     import modal_app
     sig = inspect.signature(modal_app.run_ingestion_background.raw_f
                             if hasattr(modal_app.run_ingestion_background, "raw_f")
@@ -369,18 +371,23 @@ def test_generation_job_filename_uses_document_title():
         db.query.side_effect = query_dispatch
         return db
 
-    with patch("api.routers.ingestion._spawn_worker", return_value="thread"), \
-         patch("api.dependencies.get_db", return_value=fake_db()):
+    db_instance = fake_db()
+    from api.dependencies import get_db
 
-        client = TestClient(app)
-        resp = client.post("/ingestion/spawn", json={
-            "mode": "GENERATION",
-            "doc_id": doc_id,
-            "file_path": None,
-            "subject_id": 1,
-            "question_type": "active_recall",
-            "target_topics": ["Transition Metals"],
-        })
+    with patch("api.routers.ingestion._spawn_worker", return_value="thread"):
+        app.dependency_overrides[get_db] = lambda: db_instance
+        try:
+            client = TestClient(app)
+            resp = client.post("/ingestion/spawn", json={
+                "mode": "GENERATION",
+                "doc_id": doc_id,
+                "file_path": None,
+                "subject_id": 1,
+                "question_type": "active_recall",
+                "target_topics": ["Transition Metals"],
+            })
+        finally:
+            app.dependency_overrides.pop(get_db, None)
 
     assert resp.status_code == 202
     body = resp.json()
@@ -424,18 +431,24 @@ def test_generation_job_filename_falls_back_to_db_filename_if_no_title():
         db.query.side_effect = query_dispatch
         return db
 
-    with patch("api.routers.ingestion._spawn_worker", return_value="thread"), \
-         patch("api.dependencies.get_db", return_value=fake_db()):
+    db_instance = fake_db()
+    from api.app import app
+    from api.dependencies import get_db
 
-        client = TestClient(app)
-        resp = client.post("/ingestion/spawn", json={
-            "mode": "GENERATION",
-            "doc_id": doc_id,
-            "file_path": None,
-            "subject_id": 1,
-            "question_type": "active_recall",
-            "target_topics": [],
-        })
+    with patch("api.routers.ingestion._spawn_worker", return_value="thread"):
+        app.dependency_overrides[get_db] = lambda: db_instance
+        try:
+            client = TestClient(app)
+            resp = client.post("/ingestion/spawn", json={
+                "mode": "GENERATION",
+                "doc_id": doc_id,
+                "file_path": None,
+                "subject_id": 1,
+                "question_type": "active_recall",
+                "target_topics": [],
+            })
+        finally:
+            app.dependency_overrides.pop(get_db, None)
 
     assert resp.status_code == 202
     assert resp.json()["filename"] == "dnf_block.pdf"

@@ -71,7 +71,7 @@ def _make_state(mode, doc_id, subject_id=None, current_page=0, total_pages=1, qu
         "chunks": [],
         "current_chunk_index": 0,
         "hierarchy": [],
-        "pending_qdrant_docs": [],
+        "pending_vector_docs": [],
         "current_new_cards": [],
         "generated_flashcards": [],
         "status_message": "start",

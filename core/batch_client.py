@@ -115,26 +115,12 @@ class BatchClient:
     # Step 1 — index a PDF (idempotent via content hash)
     # ------------------------------------------------------------------
 
-    def _check_qdrant(self) -> None:
-        """Raise a clear error if Qdrant is unreachable before starting any indexing."""
-        try:
-            from qdrant_client import QdrantClient as _QC
-            _qc = _QC(url=settings.QDRANT_URL, timeout=5)
-            _qc.get_collections()
-        except Exception as e:
-            raise RuntimeError(
-                f"Cannot reach Qdrant at {settings.QDRANT_URL}.\n"
-                "Start it with:  docker-compose up -d\n"
-                f"(original error: {e})"
-            ) from e
-
     def index_pdf_if_needed(self, pdf_path: Path, subject_id: int) -> str:
         """Index a PDF into the library if not already present, then link to subject.
 
         Returns the document UUID (new or existing).
-        Requires Qdrant to be running (same as the app's Library page).
+        Requires PGVector (via DB_URL) to be reachable.
         """
-        self._check_qdrant()
         content_hash = _hash_file(pdf_path)
         with SessionLocal() as db:
             existing = (

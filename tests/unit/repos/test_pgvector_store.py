@@ -71,15 +71,9 @@ class TestPGVectorStoreSearch:
 
 
 class TestPGVectorStoreGeneral:
-    def test_factory_returns_correct_store(self):
+    def test_factory_returns_pgvector_store(self):
         from repositories.vector.factory import get_vector_store
         from repositories.vector.pgvector_store import PGVectorStore
-        from repositories.vector.qdrant_store import QdrantStore
-        
-        with patch("core.config.settings.VECTOR_STORE_TYPE", "pgvector"):
-            store = get_vector_store()
-            assert isinstance(store, PGVectorStore)
-            
-        with patch("core.config.settings.VECTOR_STORE_TYPE", "qdrant"):
-            store = get_vector_store()
-            assert isinstance(store, QdrantStore)
+
+        store = get_vector_store()
+        assert isinstance(store, PGVectorStore)

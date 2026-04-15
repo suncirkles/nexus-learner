@@ -16,6 +16,7 @@ from agents.topic_assigner import TopicAssignerAgent
 from agents.topic_matcher import TopicMatcherAgent
 from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, Document as DBDocument, SubjectDocumentAssociation, SubjectTopicAssociation
 from repositories.sql.flashcard_repo import FlashcardRepo
+from repositories.vector.factory import get_vector_store
 from core.config import settings
 import logging
 import os
@@ -42,8 +43,8 @@ class GraphState(TypedDict):
     # Discovery context
     hierarchy: List[Dict[str, Any]]
 
-    # Qdrant batch buffer: accumulates per-page docs, flushed at page boundary
-    pending_qdrant_docs: List[Dict[str, Any]]  # {"text": str, "metadata": dict}
+    # Vector batch buffer: accumulates per-page docs, flushed at page boundary
+    pending_vector_docs: List[Dict[str, Any]]  # {"text": str, "metadata": dict}
 
     # Semantic topic matching results (GENERATION only)
     # None  → no filter (all chunks)
@@ -615,7 +616,7 @@ def node_assign_topic(state: GraphState):
     chunk_text = state["chunks"][idx]
     doc_id = state["doc_id"]
     hierarchy = state.get("hierarchy", [])
-    pending = list(state.get("pending_qdrant_docs", []))
+    pending = list(state.get("pending_vector_docs", []))
     subtopic_embeddings = state.get("subtopic_embeddings") or []
 
     assigned_subtopic_id = None
@@ -681,7 +682,7 @@ def node_assign_topic(state: GraphState):
         pending.append({"text": chunk_text, "metadata": {"document_id": doc_id, "db_chunk_id": new_chunk.id}})
         return {
             "hierarchy": hierarchy,
-            "pending_qdrant_docs": pending,
+            "pending_vector_docs": pending,
             "status_message": f"Indexed chunk to subtopic id={assigned_subtopic_id}",
         }
     except Exception as e:
@@ -689,7 +690,7 @@ def node_assign_topic(state: GraphState):
         logger.error("Error persisting chunk %d for doc %s: %s", idx, doc_id, e, exc_info=True)
         return {
             "hierarchy": hierarchy,
-            "pending_qdrant_docs": pending,
+            "pending_vector_docs": pending,
             "status_message": f"Warning: failed to index chunk {idx} — {e}",
         }
     finally:
@@ -700,8 +701,7 @@ def _flush_vector_batch(pending_docs: List[Dict[str, Any]]):
     """Upserts a batch of pending docs to the configured vector store."""
     if not pending_docs:
         return
-    from repositories.vector.factory import get_vector_store
-    
+
     try:
         store = get_vector_store()
         store.upsert_chunks(pending_docs)
@@ -855,14 +855,14 @@ def node_increment(state: GraphState):
 
 def node_next_page(state: GraphState):
     """Flushes the vector batch for the completed page, then advances."""
-    _flush_vector_batch(state.get("pending_qdrant_docs", []))
-    return {"current_page": state["current_page"] + 1, "pending_qdrant_docs": []}
+    _flush_vector_batch(state.get("pending_vector_docs", []))
+    return {"current_page": state["current_page"] + 1, "pending_vector_docs": []}
 
 
-def node_flush_qdrant(state: GraphState):
+def node_flush_vectors(state: GraphState):
     """Flushes the final vector batch at the end of INDEXING (last page)."""
-    _flush_vector_batch(state.get("pending_qdrant_docs", []))
-    return {"pending_qdrant_docs": [], "status_message": "Document indexing complete."}
+    _flush_vector_batch(state.get("pending_vector_docs", []))
+    return {"pending_vector_docs": [], "status_message": "Document indexing complete."}
 
 # 4. Build Graph
 workflow = StateGraph(GraphState)
@@ -875,7 +875,7 @@ workflow.add_node("generate", node_generate)
 workflow.add_node("critic", node_critic)
 workflow.add_node("increment", node_increment)
 workflow.add_node("next_page", node_next_page)
-workflow.add_node("flush_qdrant", node_flush_qdrant)
+workflow.add_node("flush_vectors", node_flush_vectors)
 
 # match_topics is a no-op for INDEXING; for GENERATION it resolves topic names
 # to subtopic IDs before node_ingest loads the chunk list.
@@ -922,17 +922,17 @@ def router_after_increment(state: GraphState):
     if state["mode"] == "INDEXING":
         if state["current_page"] < state["total_pages"] - 1:
             return "next_page"
-        return "flush_qdrant"  # last page: flush batch before END
+        return "flush_vectors"  # last page: flush batch before END
     return END
 
 
 workflow.add_conditional_edges(
     "increment", router_after_increment,
     {"assign_topic": "assign_topic", "generate": "generate",
-     "next_page": "next_page", "flush_qdrant": "flush_qdrant", END: END},
+     "next_page": "next_page", "flush_vectors": "flush_vectors", END: END},
 )
 
 workflow.add_edge("next_page", "ingest")
-workflow.add_edge("flush_qdrant", END)
+workflow.add_edge("flush_vectors", END)
 
 phase1_graph = workflow.compile()

@@ -322,19 +322,17 @@ _run_migrations()
 
 
 def reset_database():
-    """Drops all tables and recreates them, plus clears Qdrant."""
+    """Drops all tables and recreates them, plus clears the vector store."""
     logger.info("--- RESETTING DATABASE ---")
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
-    
+
     try:
-        from qdrant_client import QdrantClient
-        client = QdrantClient(settings.QDRANT_URL)
-        if client.collection_exists(settings.QDRANT_COLLECTION_NAME):
-            client.delete_collection(settings.QDRANT_COLLECTION_NAME)
-            logger.info(f"Deleted Qdrant collection: {settings.QDRANT_COLLECTION_NAME}")
+        from repositories.vector.factory import get_vector_store
+        get_vector_store().drop_collection()
+        logger.info("Dropped vector store collection")
     except Exception as e:
-        logger.warning(f"Failed to clear Qdrant: {e}")
+        logger.warning(f"Failed to clear vector store: {e}")
 
 
 def get_db():

@@ -59,7 +59,7 @@ def _make_state(mode, doc_id, subject_id=None, file_path=None, total_pages=0, **
         "chunks": [],
         "current_chunk_index": 0,
         "hierarchy": [],
-        "pending_qdrant_docs": [],
+        "pending_vector_docs": [],
         "matched_subtopic_ids": None,
         "current_new_cards": [],
         "subtopic_embeddings": [],

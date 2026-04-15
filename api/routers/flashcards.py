@@ -4,6 +4,11 @@ api/routers/flashcards.py
 Flashcard status management, bulk operations, and subtopic queries.
 """
 
+import base64
+import logging
+import os
+
+import fitz  # PyMuPDF
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -17,7 +22,10 @@ from api.schemas import (
     ChunkSourceBatchResponse,
 )
 from api.dependencies import get_flashcard_service
+from core.config import settings
 from services.flashcard_service import FlashcardService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/flashcards", tags=["flashcards"])
 
@@ -70,10 +78,6 @@ def get_chunk_page_image(
     Returns {"image_b64": "<base64>", "page_number": <int>} on success,
     or 404 if the chunk/document is not found, or 422 if the file is unavailable.
     """
-    import os, base64
-    import fitz  # PyMuPDF
-    from core.config import settings
-
     src = svc.get_chunk_source(chunk_id)
     if src is None:
         raise HTTPException(status_code=404, detail="Chunk not found")
@@ -115,8 +119,7 @@ def get_chunk_page_image(
             import modal as _modal
             _modal.Volume.from_name("nexus-learner-data").reload()
         except Exception as _ve:
-            import logging as _logging
-            _logging.getLogger(__name__).warning("vol.reload() failed (non-fatal): %s", _ve)
+            logger.warning("vol.reload() failed (non-fatal): %s", _ve)
         # Re-check cache after reload — worker may have committed PNGs since startup
         if os.path.exists(cached_path):
             with open(cached_path, "rb") as _f:

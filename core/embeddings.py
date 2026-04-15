@@ -7,8 +7,8 @@ Replaces sentence-transformers / langchain-huggingface with the same
 all-MiniLM-L6-v2 model but without PyTorch — fastembed runs it via ONNX,
 which is dramatically lighter.
 
-Vectors are identical in shape (384-dim) and compatible with existing Qdrant
-collections built with sentence-transformers/all-MiniLM-L6-v2.
+Vectors are identical in shape (384-dim) and compatible with
+sentence-transformers/all-MiniLM-L6-v2.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ class FastEmbedEmbeddings(Embeddings):
     """LangChain Embeddings wrapper around fastembed TextEmbedding.
 
     Drop-in replacement for HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2").
-    Requires: qdrant-client[fastembed] (installs the fastembed package).
+    Requires: fastembed>=0.3.0
     """
 
     DEFAULT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"

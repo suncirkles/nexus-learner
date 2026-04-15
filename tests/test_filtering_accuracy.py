@@ -20,7 +20,7 @@ def _build_generation_state(doc_id: str, subject_id: int, target_topics: list) -
         "chunks": [],
         "current_chunk_index": 0,
         "hierarchy": [],
-        "pending_qdrant_docs": [],
+        "pending_vector_docs": [],
         "current_new_cards": [],
         "generated_flashcards": [],
         "file_path": None,

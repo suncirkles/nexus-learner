@@ -6,13 +6,12 @@ langchain-anthropic>=0.1.0
 langchain-groq>=0.2.0
 langchain-google-genai>=2.0.0
 langchain-litellm>=0.1.0
-langchain-qdrant>=0.1.0
 langgraph>=0.1.0
 langsmith>=0.1.59          # observability tracing
 litellm>=1.0.0
 
-# Vector DB — fastembed extra replaces sentence-transformers (ONNX, no PyTorch)
-qdrant-client[fastembed]>=1.9.0
+# Embeddings — fastembed (ONNX, no PyTorch) replaces sentence-transformers
+fastembed>=0.3.0
 
 # Storage / DB
 sqlalchemy>=2.0.0

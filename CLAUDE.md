@@ -89,9 +89,8 @@ All Streamlit pages communicate exclusively through `ui/api_client.py`. No page 
 
 ### Data Storage
 
-- **PostgreSQL** (Supabase) — Relational data (subjects, topics, flashcards, etc.) AND vector storage if `pgvector` enabled.
-- **Qdrant** (Docker, port 6333) — Alternative vector store for semantic search/cache.
-- **Redis** (optional, port 6379, db 1) — Persistent semantic cache backend
+- **PostgreSQL** (Supabase) — Relational data AND vector storage (PGVector) AND semantic cache (default).
+- **Redis** (optional, port 6379, db 1) — Alternative semantic cache backend (`SEMANTIC_CACHE_BACKEND=redis`)
 
 ### Flashcard Lifecycle
 
@@ -116,9 +115,9 @@ Set `LANGCHAIN_TRACING_V2=true` and `LANGCHAIN_API_KEY` in `.env` to enable trac
 | `ROUTING_MODEL` | `gpt-4o-mini` | Fast routing/classification model |
 | `AUTO_ACCEPT_CONTENT` | `false` | Skip HITL review |
 | `SEMANTIC_CACHE_ENABLED` | `true` | Enable/disable semantic cache |
-| `SEMANTIC_CACHE_BACKEND` | `qdrant` | `qdrant` or `redis` |
+| `SEMANTIC_CACHE_BACKEND` | `pgvector` | `pgvector` (default) or `redis` |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection (used when backend=redis) |
 | `REDIS_CACHE_DB` | `1` | Redis DB index for cache |
-| `VECTOR_STORE_TYPE` | `qdrant` | `qdrant` or `pgvector` |
+| `VECTOR_STORE_TYPE` | `pgvector` | `pgvector` only (Qdrant removed) |
 | `PGVECTOR_COLLECTION_NAME` | `nexus_vectors` | Table name for PGVector storage |
 | `API_BASE_URL` | `http://127.0.0.1:8000` | FastAPI base URL used by Streamlit |

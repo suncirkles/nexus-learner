@@ -8,11 +8,14 @@ Hosts:
 3. Background Workers (Ingestion tasks)
 """
 
+import logging
 import modal
 import os
 import subprocess
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # 1. Define the system image and Python environment
 image = (
@@ -26,11 +29,10 @@ image = (
         "langchain-groq",
         "langchain-google-genai",
         "langchain-litellm",
-        "langchain-qdrant",
         "langgraph",
         "langsmith",
         "litellm",
-        "qdrant-client[fastembed]",
+        "fastembed",
         "sqlalchemy",
         "psycopg2-binary",
         "pgvector",
@@ -181,7 +183,7 @@ def run_ingestion_background(job_id: str, doc_id: str, file_path: Optional[str],
         _vol = _modal.Volume.from_name("nexus-learner-data")
         _vol.reload()
     except Exception as _ve:
-        print(f"Warning: volume reload failed (non-fatal): {_ve}")
+        logger.warning("volume reload failed (non-fatal): %s", _ve)
 
     from datetime import datetime, timezone
     from core.database import SessionLocal, BatchJob
@@ -190,7 +192,7 @@ def run_ingestion_background(job_id: str, doc_id: str, file_path: Optional[str],
     db = SessionLocal()
     job = db.query(BatchJob).filter(BatchJob.id == job_id).first()
     if not job:
-        print(f"Error: Job {job_id} not found in database.")
+        logger.error("Job %s not found in database.", job_id)
         return
 
     try:
@@ -206,7 +208,7 @@ def run_ingestion_background(job_id: str, doc_id: str, file_path: Optional[str],
             "chunks": [],
             "current_chunk_index": 0,
             "hierarchy": [],
-            "pending_qdrant_docs": [],
+            "pending_vector_docs": [],
             "matched_subtopic_ids": None,
             "current_new_cards": [],
             "subtopic_embeddings": [],
@@ -257,14 +259,13 @@ def run_ingestion_background(job_id: str, doc_id: str, file_path: Optional[str],
         try:
             import modal as _modal
             _modal.Volume.from_name("nexus-learner-data").commit()
-            print(f"Volume committed after job {job_id}")
+            logger.info("Volume committed after job %s", job_id)
         except Exception as _ve:
-            print(f"Warning: volume commit failed (non-fatal): {_ve}")
+            logger.warning("volume commit failed (non-fatal): %s", _ve)
 
-        print(f"Job {job_id} completed successfully.")
+        logger.info("Job %s completed successfully.", job_id)
     except Exception as e:
-        print(f"Job {job_id} failed: {e}")
-        import traceback; traceback.print_exc()
+        logger.exception("Job %s failed: %s", job_id, e)
         job.status = "failed"
         job.error = str(e)
         job.status_message = f"Error: {e}"

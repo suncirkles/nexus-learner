@@ -1,7 +1,7 @@
 """
 repositories/vector/pgvector_store.py
 ---------------------------------------
-PGVector implementation of VectorStoreProvider.
+PGVector implementation of VectorStoreProtocol.
 Uses langchain-postgres to store and search vector embeddings in Supabase/PostgreSQL.
 """
 
@@ -10,13 +10,47 @@ from typing import List, Optional, Dict, Any
 
 from core.config import settings
 from repositories.protocols import VectorStoreProtocol
-from repositories.vector.qdrant_store import _make_embeddings
 
 logger = logging.getLogger(__name__)
 
 
+def _make_embeddings():
+    """Return (embeddings_instance, collection_name).
+
+    Tries OpenAI first; falls back to local FastEmbed (all-MiniLM-L6-v2, 384 dims).
+    The HuggingFace fallback appends '_hf' to the collection name so OpenAI and
+    HuggingFace vectors never share the same table.
+    """
+    def _is_real_openai_key(key: str) -> bool:
+        return bool(key) and key.startswith("sk-") and len(key) > 20
+
+    use_hf = settings.EMBEDDING_PROVIDER.lower() == "huggingface"
+
+    if not use_hf:
+        if _is_real_openai_key(settings.OPENAI_API_KEY):
+            from langchain_openai import OpenAIEmbeddings
+            return OpenAIEmbeddings(api_key=settings.OPENAI_API_KEY), settings.PGVECTOR_COLLECTION_NAME
+        logger.warning(
+            "EMBEDDING_PROVIDER=openai but key is absent/invalid — "
+            "falling back to FastEmbed embeddings"
+        )
+
+    try:
+        from core.embeddings import FastEmbedEmbeddings
+        logger.info("Using FastEmbed all-MiniLM-L6-v2 embeddings (384 dims, ONNX)")
+        embeddings = FastEmbedEmbeddings()
+        collection = settings.PGVECTOR_COLLECTION_NAME + "_hf"
+        return embeddings, collection
+    except Exception as e:
+        raise ValueError(
+            "FastEmbed embeddings unavailable. "
+            "Install with: pip install fastembed. "
+            f"Original error: {e}"
+        )
+
+
 class PGVectorStore(VectorStoreProtocol):
-    """PGVector implementation using the same interface as QdrantStore."""
+    """PGVector implementation using the same interface as the old QdrantStore."""
 
     def __init__(self):
         self._embeddings = None
@@ -25,17 +59,12 @@ class PGVectorStore(VectorStoreProtocol):
 
     def _init_embeddings(self):
         if self._embeddings is None:
-            # We reuse the same logic for provider fallback (OpenAI -> HF)
-            self._embeddings, _ = _make_embeddings()
-            # Use specific PGVector collection name from settings
-            self._collection_name = settings.PGVECTOR_COLLECTION_NAME
+            self._embeddings, self._collection_name = _make_embeddings()
 
     def _get_store(self):
         self._init_embeddings()
         if self._store is None:
             from langchain_postgres import PGVector
-            
-            # langchain-postgres uses a connection string
             self._store = PGVector(
                 embeddings=self._embeddings,
                 collection_name=self._collection_name,
@@ -60,7 +89,7 @@ class PGVectorStore(VectorStoreProtocol):
             return
 
         from langchain_core.documents import Document as LCDoc
-        
+
         lc_docs = [
             LCDoc(page_content=c["text"], metadata=c.get("metadata", {}))
             for c in chunks
@@ -75,24 +104,10 @@ class PGVectorStore(VectorStoreProtocol):
             raise
 
     def delete_by_document(self, document_id: str) -> None:
-        """Delete all vectors for a given document_id filter."""
+        """Delete all vectors for a given document_id."""
         try:
             store = self._get_store()
-            # PGVector doesn't have a direct delete_by_metadata like QdrantClient
-            # We use the underlying sync_connection to execute a DELETE or 
-            # use store.delete() with IDs if we had them.
-            # However, langchain-postgres supports delete by filtered collection.
-            # For simplicity, we can use the SQL connection directly.
-            
-            from sqlalchemy import create_engine, text
-            engine = create_engine(settings.DB_URL)
-            with engine.connect() as conn:
-                # langchain-postgres default table is langchain_pg_embedding
-                # but we can check the implementation or use metadata filtering.
-                # Actually, langchain_postgres.PGVector.delete(filter={"document_id": document_id})
-                # is the intended way if IDs are not known.
-                store.delete(filter={"document_id": document_id})
-                
+            store.delete(filter={"document_id": document_id})
             logger.info("Deleted PGVector vectors for document_id=%s", document_id)
         except Exception as e:
             logger.warning("PGVector delete_by_document failed for %s: %s", document_id, e)
@@ -106,26 +121,20 @@ class PGVectorStore(VectorStoreProtocol):
     ) -> List[Dict[str, Any]]:
         """Semantic search returning list of {"text": str, "metadata": dict, "score": float}."""
         store = self._get_store()
-        
-        filter_dict = None
-        if filter_doc_id:
-            filter_dict = {"document_id": filter_doc_id}
 
-        # similarity_search_with_score returns (Document, score)
+        filter_dict = {"document_id": filter_doc_id} if filter_doc_id else None
+
         results = store.similarity_search_with_score(query, k=top_k, filter=filter_dict)
-        
-        # Note: PGVector scores might have different range/meaning than Qdrant, 
-        # but the interface remains consistent.
         return [
             {"text": doc.page_content, "metadata": doc.metadata, "score": score}
             for doc, score in results
         ]
 
     def drop_collection(self) -> None:
-        """Clear all vectors from the pgvector table."""
+        """Drop the pgvector tables for this collection (used by system reset)."""
         try:
             store = self._get_store()
-            store.drop_tables() # Or just truncate
+            store.drop_tables()
             logger.info("Dropped PGVector tables for collection: %s", self._collection_name)
         except Exception as e:
             logger.warning("PGVector drop_collection failed: %s", e)

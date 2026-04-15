@@ -18,6 +18,11 @@ import threading
 from datetime import datetime, timezone
 from typing import List, Optional
 
+try:
+    import modal
+except ImportError:
+    modal = None  # type: ignore[assignment]  # not installed locally
+
 from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile, File, status
 from sqlalchemy.orm import Session
 
@@ -74,7 +79,7 @@ def _run_ingestion_db_thread(
             "chunks": [],
             "current_chunk_index": 0,
             "hierarchy": [],
-            "pending_qdrant_docs": [],
+            "pending_vector_docs": [],
             "matched_subtopic_ids": None,
             "current_new_cards": [],
             "subtopic_embeddings": [],
@@ -145,7 +150,6 @@ def _commit_volume() -> None:
     if os.environ.get("MODAL_RUN") != "true":
         return
     try:
-        import modal
         vol = modal.Volume.from_name("nexus-learner-data")
         vol.commit()
         logger.debug("Volume committed after file write")
@@ -177,7 +181,6 @@ def _spawn_worker(
 
     if os.environ.get("MODAL_RUN") == "true":
         try:
-            import modal
             func = modal.Function.from_name("nexus-learner", "run_ingestion_background")
             func.spawn(job_id, doc_id, file_path, subject_id, mode, target_topics, question_type)
             spawner = "modal"

@@ -39,20 +39,13 @@ class Settings(BaseSettings):
     MODAL_TOKEN_SECRET: str = ""
     MODAL_ENVIRONMENT: str = "main"
 
-    # Vector DB (Qdrant)
-    QDRANT_URL: str = "http://localhost:6333"
-    QDRANT_API_KEY: str = ""
-    QDRANT_COLLECTION_NAME: str = "nexus_chunks"
-    
-    # Vector DB Selection
-    # "qdrant"   = Qdrant (default, uses QDRANT_URL/API_KEY)
-    # "pgvector" = PostgreSQL/Supabase (uses DB_URL)
-    VECTOR_STORE_TYPE: str = "qdrant"
+    # Vector DB — PGVector (PostgreSQL/Supabase, uses DB_URL)
+    VECTOR_STORE_TYPE: str = "pgvector"
     PGVECTOR_COLLECTION_NAME: str = "nexus_vectors"
 
-    # Embeddings (used by IngestionAgent for Qdrant vector storage)
+    # Embeddings
     # "openai"      = OpenAIEmbeddings (requires valid key, 1536 dims)
-    # "huggingface" = local all-MiniLM-L6-v2 (no key needed, 384 dims, "_hf" collection suffix)
+    # "huggingface" = local all-MiniLM-L6-v2 via fastembed (no key needed, 384 dims)
     EMBEDDING_PROVIDER: str = "openai"
 
     # Model hopping (free-tier multi-provider routing via LiteLLM)
@@ -72,7 +65,7 @@ class Settings(BaseSettings):
         default=["FlashcardOutput"],
         description="Schema __name__ values never stored in or served from cache",
     )
-    SEMANTIC_CACHE_BACKEND: str = "qdrant"   # "qdrant" | "redis"
+    SEMANTIC_CACHE_BACKEND: str = "pgvector" # "pgvector" (default) | "redis" | "qdrant" (deprecated)
     REDIS_URL: str = "redis://localhost:6379"
     REDIS_CACHE_DB: int = 1                  # separate DB index for cache
 
@@ -133,7 +126,7 @@ class Settings(BaseSettings):
     CONTENT_SAFETY_ENABLED: bool = True     # Enable safety guardrails
 
     # Security
-    ALLOWED_ORIGINS: list[str] = ["http://localhost:8501", "http://127.0.0.1:8501", "*.modal.run"]
+    ALLOWED_ORIGINS: list[str] = ["http://localhost:8501", "http://127.0.0.1:8501"]
 
     @property
     def abs_upload_dir(self) -> str:

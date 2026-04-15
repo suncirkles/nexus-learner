@@ -65,21 +65,32 @@ class IngestionAgent:
             return ""
 
     def load_page_text(self, file_path: str, page_number: int) -> str:
-        """Loads text from a specific page of a PDF, with OCR fallback."""
+        """Loads text from a specific page of a PDF, with OCR fallback.
+
+        For non-PDF files (images), delegates to extract_text_from_image()
+        for page_number=0 and returns "" for any other page.
+        """
         if not file_path.lower().endswith('.pdf'):
+            if page_number == 0:
+                return self.extract_text_from_image(file_path)
             return ""
-        
+
         try:
             with fitz.open(file_path) as doc:
+                if page_number >= len(doc):
+                    return ""
                 page = doc.load_page(page_number)
                 text = page.get_text()
-                
-                # If no text found, try OCR
-                if not text.strip():
-                    pix = page.get_pixmap()
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    text = pytesseract.image_to_string(img)
-                    
+
+                # Sparse text (< 50 chars) likely indicates a scanned page — try OCR.
+                if len(text.strip()) < 50:
+                    try:
+                        pix = page.get_pixmap()
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        text = pytesseract.image_to_string(img)
+                    except Exception as ocr_err:
+                        logger.warning(f"OCR failed for page {page_number} of {file_path}: {ocr_err}")
+
             return text
         except Exception as e:
             logger.error(f"Failed to load text from page {page_number} of {file_path}: {e}")
@@ -125,15 +136,21 @@ class IngestionAgent:
         return doc["id"]
 
     def process_and_store(self, text: str, document_id: str, page_number: Optional[int] = None) -> List[int]:
-        """Chunks text, persists to SQL, and embeds into the vector store."""
+        """Chunks text, persists to SQL, and embeds into the vector store.
+
+        SQL rows and the vector upsert are committed together: the single
+        db.commit() only fires after upsert_chunks() succeeds, so a vector
+        store failure leaves no orphaned SQL rows.
+        """
         chunks = self.text_splitter.split_text(text)
-        
+
         from core.database import SessionLocal, ContentChunk
         db = SessionLocal()
-        chunk_ids = []
+        db_chunks = []
         vector_data = []
 
         try:
+            # Stage all rows — no commit yet.
             for text_chunk in chunks:
                 db_chunk = ContentChunk(
                     document_id=document_id,
@@ -141,23 +158,28 @@ class IngestionAgent:
                     page_number=page_number
                 )
                 db.add(db_chunk)
-                db.commit()
-                db.refresh(db_chunk)
-                chunk_ids.append(db_chunk.id)
-                
+                db_chunks.append(db_chunk)
+
+            # Flush assigns auto-increment IDs without committing the transaction.
+            db.flush()
+
+            for db_chunk in db_chunks:
                 vector_data.append({
-                    "text": text_chunk,
+                    "text": db_chunk.text,
                     "metadata": {
                         "document_id": document_id,
                         "db_chunk_id": db_chunk.id,
-                        "page_number": page_number
+                        "page_number": page_number,
                     }
                 })
-            
-            # Use unified vector store for upsert
+
+            # Vector upsert first — if it raises, the transaction rolls back on close.
             self._vector_store.upsert_chunks(vector_data)
-            
-            return chunk_ids
+
+            # Both writes succeeded — commit once.
+            db.commit()
+
+            return [c.id for c in db_chunks]
         except Exception as e:
             db.rollback()
             logger.error(f"Failed to process and store chunks for doc {document_id}: {e}")

@@ -83,29 +83,45 @@ _PAGE_SIZE = 20
 def render_flashcard_list(sub_id, status="approved", question_types: list | None = None):
     """Render a paginated list of flashcards for a subtopic.
 
-    question_types: optional list of question type strings for client-side filtering.
-    The fetch is always unfiltered (consistent pagination); filtering is applied on display.
+    Caches by (sub_id, status, question_type) — each combination is an
+    independent cache entry with its own page counter.  Switching filters reuses
+    a cached entry when available; no cache reset is triggered by the filter
+    change itself.  On approve/reject, only the affected type + "all" are
+    invalidated via _invalidate_fc_cache().
+
+    question_types:
+    - None / empty list  → fetch all types (qt_key = "all")
+    - [one type]         → server-side filter for that type (qt_key = that type)
+    - [multiple types]   → fetch all, filter client-side (qt_key = "all")
     """
-    page_key = f"fc_page_{sub_id}_{status}"
+    # Determine server-side filter and cache key segment.
+    if question_types and len(question_types) == 1:
+        api_qt = question_types[0]
+        qt_key = api_qt
+    else:
+        api_qt = None       # no server-side filter
+        qt_key = "all"
+
+    # Each (sub_id, status, qt_key) has its own independent page counter.
+    page_key = f"fc_page_{sub_id}_{status}_{qt_key}"
     if page_key not in st.session_state:
         st.session_state[page_key] = 0
     page = st.session_state[page_key]
 
-    cache_key = f"fc_cache_{sub_id}_{status}_{page}"
+    cache_key = f"fc_cache_{sub_id}_{status}_{qt_key}_{page}"
     if cache_key not in st.session_state:
         with st.spinner("Loading cards..."):
             fcs = api_client.get_flashcards_by_subtopic(
-                sub_id, status, skip=page * _PAGE_SIZE, limit=_PAGE_SIZE
+                sub_id, status, skip=page * _PAGE_SIZE, limit=_PAGE_SIZE,
+                question_type=api_qt,
             )
         st.session_state[cache_key] = fcs
     else:
         fcs = st.session_state[cache_key]
 
-    # Apply client-side type filter if requested.
-    if question_types:
+    # Client-side filter only when multiple types are selected.
+    if question_types and not api_qt:
         fcs_display = [fc for fc in fcs if fc.get("question_type") in question_types]
-        if len(fcs_display) < len(fcs):
-            st.caption(f"Showing {len(fcs_display)} of {len(fcs)} cards on this page (filter active).")
     else:
         fcs_display = fcs
 
@@ -153,11 +169,30 @@ def render_flashcard_list(sub_id, status="approved", question_types: list | None
             st.session_state[page_key] = page + 1
 
 
-def _invalidate_fc_cache(sub_id, status):
-    """Remove all page caches for a subtopic+status so they re-fetch on next render."""
-    keys_to_clear = [k for k in st.session_state if k.startswith(f"fc_cache_{sub_id}_{status}_")]
-    for k in keys_to_clear:
-        del st.session_state[k]
+def _invalidate_fc_cache(sub_id, status, question_type: str | None = None):
+    """Invalidate cached pages for a subtopic+status.
+
+    question_type: when provided, only clears that type's cache AND the "all"
+    cache (which also contained the changed card).  Caches for other types are
+    unaffected — they haven't changed.
+    If question_type is None, clears all type caches for this subtopic+status.
+    """
+    if question_type:
+        qt_keys_to_clear = (question_type, "all")
+    else:
+        qt_keys_to_clear = None  # sentinel: clear everything
+
+    def _clear_prefix(prefix):
+        for k in [k for k in st.session_state if k.startswith(prefix)]:
+            del st.session_state[k]
+
+    if qt_keys_to_clear:
+        for qt_key in qt_keys_to_clear:
+            _clear_prefix(f"fc_cache_{sub_id}_{status}_{qt_key}_")
+            _clear_prefix(f"fc_page_{sub_id}_{status}_{qt_key}")
+    else:
+        _clear_prefix(f"fc_cache_{sub_id}_{status}_")
+        _clear_prefix(f"fc_page_{sub_id}_{status}_")
 
 
 def _render_review_card_with_cache(fc: dict, current_status: str, cache_key: str, sources_map: dict):
@@ -281,6 +316,8 @@ def _render_review_card_inner(fc: dict, current_status: str, src, cache_key: str
 
     cols = st.columns([0.15, 0.15, 0.15, 0.55])
 
+    qt = fc_question_type  # used for surgical cache invalidation
+
     if current_status == "pending":
         complexity_key = f"complexity_{fc_id}"
         complexity_options = ["(unset)", "simple", "medium", "complex"]
@@ -297,18 +334,17 @@ def _render_review_card_inner(fc: dict, current_status: str, src, cache_key: str
                 fc_id, "approved",
                 complexity_level=None if selected_complexity == "(unset)" else selected_complexity,
             )
-            # Optimistic: remove from current cache, invalidate approved cache.
             if cache_key in st.session_state:
                 st.session_state[cache_key] = [c for c in st.session_state[cache_key] if c["id"] != fc_id]
             if sub_id:
-                _invalidate_fc_cache(sub_id, "approved")
+                _invalidate_fc_cache(sub_id, "approved", qt)
             st.rerun()
         if cols[1].button("Reject", key=f"p_rej_{fc_id}"):
             api_client.update_flashcard_status(fc_id, "rejected")
             if cache_key in st.session_state:
                 st.session_state[cache_key] = [c for c in st.session_state[cache_key] if c["id"] != fc_id]
             if sub_id:
-                _invalidate_fc_cache(sub_id, "rejected")
+                _invalidate_fc_cache(sub_id, "rejected", qt)
             st.rerun()
     elif current_status == "approved":
         if cols[0].button("Discard", key=f"a_disc_{fc_id}"):
@@ -316,7 +352,7 @@ def _render_review_card_inner(fc: dict, current_status: str, src, cache_key: str
             if cache_key in st.session_state:
                 st.session_state[cache_key] = [c for c in st.session_state[cache_key] if c["id"] != fc_id]
             if sub_id:
-                _invalidate_fc_cache(sub_id, "rejected")
+                _invalidate_fc_cache(sub_id, "rejected", qt)
             st.rerun()
     elif current_status == "rejected":
         if cols[0].button("Restore", key=f"r_res_{fc_id}"):
@@ -324,11 +360,10 @@ def _render_review_card_inner(fc: dict, current_status: str, src, cache_key: str
             if cache_key in st.session_state:
                 st.session_state[cache_key] = [c for c in st.session_state[cache_key] if c["id"] != fc_id]
             if sub_id:
-                _invalidate_fc_cache(sub_id, "pending")
+                _invalidate_fc_cache(sub_id, "pending", qt)
             st.rerun()
         if cols[1].button("Delete", key=f"r_del_{fc_id}"):
             api_client.delete_flashcard(fc_id)
-            # Optimistic: remove from cache — no list re-fetch needed.
             if cache_key in st.session_state:
                 st.session_state[cache_key] = [c for c in st.session_state[cache_key] if c["id"] != fc_id]
             st.rerun()

@@ -42,7 +42,7 @@ def _initial_state(mode: str, doc_id: str, subject_id=None, question_type="activ
         "chunks": [],
         "current_chunk_index": 0,
         "hierarchy": [],
-        "pending_qdrant_docs": [],
+        "pending_vector_docs": [],
         "current_new_cards": [],
         "generated_flashcards": [],
         "status_message": "start",

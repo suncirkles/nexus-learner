@@ -12,8 +12,9 @@ Start the server:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import subjects, flashcards, topics, library, system
+from api.routers import subjects, flashcards, topics, library, ingestion, system
 from api.middleware import ObservabilityMiddleware
+from core.config import settings
 
 
 def create_app() -> FastAPI:
@@ -28,7 +29,7 @@ def create_app() -> FastAPI:
     
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
+        allow_origins=settings.ALLOWED_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -38,6 +39,7 @@ def create_app() -> FastAPI:
     app.include_router(flashcards.router)
     app.include_router(topics.router)
     app.include_router(library.router)
+    app.include_router(ingestion.router)
     app.include_router(system.router)
 
     return app

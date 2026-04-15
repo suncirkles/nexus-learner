@@ -128,7 +128,7 @@ def isolated_db():
     """Fresh SQLite in-memory DB used for all tests in this module.
 
     We patch SessionLocal in all agents and workflows so real project DB is
-    untouched.  Qdrant is still live (phase1_ingestion._flush_qdrant_batch).
+    untouched.  Vector store is still live (phase1_ingestion._flush_vector_batch).
     """
     from core.database import Base
     engine = create_engine(
@@ -166,7 +166,7 @@ def _make_initial_state(
         "chunks": [],
         "current_chunk_index": 0,
         "hierarchy": [],
-        "pending_qdrant_docs": [],
+        "pending_vector_docs": [],
         "current_new_cards": [],
         "generated_flashcards": [],
         "status_message": "start",

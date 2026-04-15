@@ -14,8 +14,9 @@ from agents.critic import CriticAgent
 from agents.curator import CuratorAgent
 from agents.topic_assigner import TopicAssignerAgent
 from agents.topic_matcher import TopicMatcherAgent
-from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, Document as DBDocument, SubjectDocumentAssociation
+from core.database import SessionLocal, Topic, Subtopic, Flashcard, ContentChunk, Document as DBDocument, SubjectDocumentAssociation, SubjectTopicAssociation
 from repositories.sql.flashcard_repo import FlashcardRepo
+from repositories.vector.factory import get_vector_store
 from core.config import settings
 import logging
 import os
@@ -42,8 +43,8 @@ class GraphState(TypedDict):
     # Discovery context
     hierarchy: List[Dict[str, Any]]
 
-    # Qdrant batch buffer: accumulates per-page docs, flushed at page boundary
-    pending_qdrant_docs: List[Dict[str, Any]]  # {"text": str, "metadata": dict}
+    # Vector batch buffer: accumulates per-page docs, flushed at page boundary
+    pending_vector_docs: List[Dict[str, Any]]  # {"text": str, "metadata": dict}
 
     # Semantic topic matching results (GENERATION only)
     # None  → no filter (all chunks)
@@ -181,7 +182,7 @@ def node_match_topics(state: GraphState):
     })
 
     if matched_ids:
-        logger.info(f"TopicMatcher: resolved {len(matched_ids)} subtopic ID(s): {matched_ids}")
+        logger.info("TopicMatcher: resolved %d subtopic ID(s): %s", len(matched_ids), matched_ids)
         return {
             "matched_subtopic_ids": matched_ids,
             "status_message": (
@@ -190,7 +191,12 @@ def node_match_topics(state: GraphState):
             ),
         }
     else:
-        logger.warning(f"TopicMatcher: no subtopics matched for topics {target_topics}")
+        logger.warning(
+            "DIAG node_match_topics: NO MATCH — target_topics=%s "
+            "indexed_subtopics=%s",
+            target_topics,
+            [s["name"] for s in indexed_subtopics],
+        )
         return {
             "matched_subtopic_ids": [],
             "status_message": f"No indexed subtopics matched: {target_topics}",
@@ -213,26 +219,38 @@ def node_ingest(state: GraphState):
         if current_page >= total_pages:
             return {"status_message": "Document indexing complete."}
 
-        # Create doc record if first visit (subject_id=None as it's global Library)
+        # Ensure document record exists on the first page.
+        # upload_and_spawn creates it via create_document_record() before spawning the
+        # worker, so this is normally a no-op.  It acts as a fallback for the legacy
+        # direct-spawn path that skips upload_and_spawn.
         if current_page == 0:
             db = SessionLocal()
             try:
-                # Hash = sample_text + file_size + basename — must match IngestionAgent.create_document_record
-                sample_text = _ingestion().load_page_text(file_path, 0)[:10000]
-                file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-                content_hash = _ingestion().get_content_hash(sample_text + str(file_size) + os.path.basename(file_path))
-                
-                existing_doc = db.query(DBDocument).filter(DBDocument.content_hash == content_hash).first()
+                # Prefer lookup by primary key (doc_id is known) — avoids any hash
+                # mismatch between the upload path and this worker path.
+                existing_doc = db.query(DBDocument).filter(DBDocument.id == doc_id).first()
                 if existing_doc:
-                    doc_id = str(existing_doc.id)  # C16: capture as primitive string
-                    db.expunge(existing_doc)        # C16: detach before session close
+                    db.expunge(existing_doc)  # detach before session close (C16)
                 else:
-                    # Fix path separator for Windows
-                    clean_filename = os.path.basename(file_path)
-                    new_doc = DBDocument(id=doc_id, filename=clean_filename, title=clean_filename, content_hash=content_hash)
+                    # Fallback: document wasn't pre-created.  Strip UUID prefix that
+                    # upload_and_spawn prepends so the stored filename is clean.
+                    raw_basename = os.path.basename(file_path)
+                    _parts = raw_basename.split("_", 1)
+                    clean_filename = (
+                        _parts[1]
+                        if len(_parts) == 2 and len(_parts[0]) == 36 and _parts[0].count("-") == 4
+                        else raw_basename
+                    )
+                    sample_text = _ingestion().load_page_text(file_path, 0)[:10000]
+                    file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+                    content_hash = _ingestion().get_content_hash(sample_text + str(file_size) + clean_filename)
+                    new_doc = DBDocument(
+                        id=doc_id, filename=clean_filename, title=clean_filename,
+                        content_hash=content_hash,
+                    )
                     db.add(new_doc)
                     db.commit()
-                    db.refresh(new_doc)
+                    logger.info("node_ingest: created fallback Document record %s", doc_id)
             finally:
                 db.close()
 
@@ -242,14 +260,14 @@ def node_ingest(state: GraphState):
 
         # Render and cache the page image for source-snippet display in Mentor Review
         if file_path and file_path.lower().endswith(".pdf"):
-            cache_dir = "page_cache"
-            os.makedirs(cache_dir, exist_ok=True)
+            from core.config import settings as _settings
+            cache_dir = _settings.abs_page_cache_dir  # /data/page_cache on Modal, ./page_cache locally
             img_path = os.path.join(cache_dir, f"{doc_id}_p{current_page:04d}.png")
             if not os.path.exists(img_path):
                 try:
                     import fitz as _fitz
                     with _fitz.open(file_path) as _doc:
-                        pix = _doc.load_page(current_page).get_pixmap(dpi=120)
+                        pix = _doc.load_page(current_page).get_pixmap(dpi=150)
                         pix.save(img_path)
                     logger.debug("Saved page image: %s", img_path)
                 except Exception as _e:
@@ -266,35 +284,64 @@ def node_ingest(state: GraphState):
     
     else:  # GENERATION mode
         logger.info("--- GENERATION: Loading Chunks for Targeted Subtopics ---")
+        logger.info("DIAG node_ingest: doc_id=%s subject_id=%s", doc_id, state.get("subject_id"))
         matched_subtopic_ids = state.get("matched_subtopic_ids")  # set by node_match_topics
+        logger.info("DIAG node_ingest: matched_subtopic_ids=%s", matched_subtopic_ids)
 
         db = SessionLocal()
         try:
-            query = db.query(ContentChunk).join(Subtopic).join(Topic).filter(
-                Topic.document_id == doc_id
+            # Diagnostic: count all chunks for this doc regardless of subtopic assignment
+            total_chunks_for_doc = db.query(ContentChunk).filter(
+                ContentChunk.document_id == doc_id
+            ).count()
+            chunks_with_subtopic = db.query(ContentChunk).filter(
+                ContentChunk.document_id == doc_id,
+                ContentChunk.subtopic_id.isnot(None),
+            ).count()
+            topics_for_doc = db.query(Topic).filter(Topic.document_id == doc_id).all()
+            logger.info(
+                "DIAG node_ingest: doc has %d total chunks, %d with subtopic_id set, %d topics",
+                total_chunks_for_doc, chunks_with_subtopic, len(topics_for_doc),
+            )
+            for t in topics_for_doc:
+                subs = db.query(Subtopic).filter(Subtopic.topic_id == t.id).all()
+                logger.info("DIAG   topic '%s' (id=%d) → %d subtopics: %s",
+                            t.name, t.id, len(subs), [s.name for s in subs])
+
+            # Join Subtopic to capture topic_id alongside the chunk — no extra queries.
+            query = (
+                db.query(ContentChunk, Subtopic.topic_id)
+                .join(Subtopic, ContentChunk.subtopic_id == Subtopic.id)
+                .join(Topic, Subtopic.topic_id == Topic.id)
+                .filter(Topic.document_id == doc_id)
             )
 
             if matched_subtopic_ids is None:
                 # No topic filter — process all chunks for this document
-                pass
+                logger.info("DIAG node_ingest: no topic filter — using all chunks with subtopic")
             elif matched_subtopic_ids:
                 # Filter to semantically matched subtopics
                 query = query.filter(ContentChunk.subtopic_id.in_(matched_subtopic_ids))
+                logger.info("DIAG node_ingest: filtering to subtopic_ids %s", matched_subtopic_ids)
             else:
                 # TopicMatcher ran but found no matches — nothing to process
-                logger.warning("TopicMatcher found no matching subtopics — returning empty chunk list.")
+                logger.warning(
+                    "DIAG node_ingest: TopicMatcher returned [] — no chunks to process. "
+                    "target_topics=%s", state.get("target_topics")
+                )
                 return {
                     "chunks": [],
                     "current_chunk_index": 0,
                     "status_message": "No chunks matched the requested topics.",
                 }
 
-            db_chunks = query.all()
-            logger.info(f"Found {len(db_chunks)} candidate chunk(s) for generation.")
+            db_rows = query.all()
+            logger.info("DIAG node_ingest: JOIN query returned %d chunk(s).", len(db_rows))
 
             question_type = state.get("question_type", "active_recall")
             chunks_to_process = []
-            for c in db_chunks:
+            skipped_h22 = 0
+            for c, topic_id in db_rows:
                 # H22: only skip subtopics with approved/pending cards of the SAME
                 # question_type — different types (e.g. active_recall vs numerical)
                 # should always be allowed to generate independently.
@@ -305,12 +352,92 @@ def node_ingest(state: GraphState):
                     Flashcard.status.in_(["approved", "pending"]),
                 ).count() > 0
                 if already_has_cards:
+                    skipped_h22 += 1
                     continue
                 chunks_to_process.append({
                     "id": c.id,
                     "text": c.text,
                     "subtopic_id": c.subtopic_id,
+                    "topic_id": topic_id,   # full hierarchy: subject→topic→subtopic→flashcard
                 })
+
+            logger.info(
+                "DIAG node_ingest: %d chunk(s) to process, %d skipped by H22 filter "
+                "(already have %s cards for subject %s)",
+                len(chunks_to_process), skipped_h22, question_type, state.get("subject_id"),
+            )
+
+            # Per-topic-type limit: cap chunks per (topic_id, question_type) so that
+            # at most MAX_CARDS_PER_TOPIC_TYPE cards are generated per topic per type.
+            # Existing approved/pending cards count toward the limit, so re-running only
+            # fills remaining capacity. Hard-capped at 50 regardless of env setting.
+            _topic_limit = min(max(int(settings.MAX_CARDS_PER_TOPIC_TYPE), 1), 50)
+            subject_id_for_limit = state.get("subject_id")
+            if subject_id_for_limit:
+                from sqlalchemy import func as _func
+                # Count existing cards per topic for this subject+question_type
+                existing_per_topic: dict = {}
+                unique_tids = {c["topic_id"] for c in chunks_to_process if c.get("topic_id")}
+                if unique_tids:
+                    rows = (
+                        db.query(Flashcard.topic_id, _func.count(Flashcard.id))
+                        .filter(
+                            Flashcard.subject_id == subject_id_for_limit,
+                            Flashcard.topic_id.in_(unique_tids),
+                            Flashcard.question_type == question_type,
+                            Flashcard.status.in_(["approved", "pending"]),
+                        )
+                        .group_by(Flashcard.topic_id)
+                        .all()
+                    )
+                    existing_per_topic = {tid: cnt for tid, cnt in rows}
+
+                # Keep at most (limit - existing) chunks per topic
+                topic_chunk_counts: dict = {}
+                limited_chunks = []
+                for c in chunks_to_process:
+                    tid = c.get("topic_id")
+                    if tid is None:
+                        limited_chunks.append(c)
+                        continue
+                    existing = existing_per_topic.get(tid, 0)
+                    capacity = max(0, _topic_limit - existing)
+                    used = topic_chunk_counts.get(tid, 0)
+                    if used < capacity:
+                        limited_chunks.append(c)
+                        topic_chunk_counts[tid] = used + 1
+                    # else: topic at capacity — skip this chunk
+
+                skipped_limit = len(chunks_to_process) - len(limited_chunks)
+                if skipped_limit:
+                    logger.info(
+                        "DIAG node_ingest: topic-type limit=%d — dropped %d chunk(s) "
+                        "at capacity. Per-topic used: %s",
+                        _topic_limit, skipped_limit, topic_chunk_counts,
+                    )
+                chunks_to_process = limited_chunks
+
+            # Invalidate and refresh SubjectTopicAssociation for this subject+document.
+            # This guarantees the explicit subject→topic bridge is current before any
+            # flashcard insertion, so the full subject→topic→subtopic chain is valid.
+            subject_id = state.get("subject_id")
+            unique_topic_ids = {c["topic_id"] for c in chunks_to_process if c.get("topic_id")}
+            if subject_id and unique_topic_ids:
+                try:
+                    db.query(SubjectTopicAssociation).filter(
+                        SubjectTopicAssociation.subject_id == subject_id,
+                        SubjectTopicAssociation.topic_id.in_(unique_topic_ids),
+                    ).delete(synchronize_session=False)
+                    for tid in unique_topic_ids:
+                        db.add(SubjectTopicAssociation(subject_id=subject_id, topic_id=tid))
+                    db.commit()
+                    logger.info(
+                        "DIAG node_ingest: refreshed SubjectTopicAssociation for "
+                        "subject=%s topic_ids=%s", subject_id, sorted(unique_topic_ids),
+                    )
+                except Exception as _sta_err:
+                    logger.warning("SubjectTopicAssociation refresh failed: %s", _sta_err)
+                    db.rollback()
 
             return {
                 "chunks": chunks_to_process,
@@ -334,6 +461,39 @@ def node_extract_hierarchy(state: GraphState):
     file_path = state["file_path"]
     doc_id = state["doc_id"]
 
+    # ------------------------------------------------------------------
+    # Ensure the Document record exists BEFORE inserting FK-dependent
+    # Topic rows.  node_ingest also does this at current_page==0, but
+    # extract_hierarchy runs first in the graph, so we must do it here.
+    # If the content hash matches an existing document we reuse its id.
+    # ------------------------------------------------------------------
+    _doc_db = SessionLocal()
+    try:
+        sample_text = _ingestion().load_page_text(file_path, 0)[:10000]
+        file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
+        content_hash = _ingestion().get_content_hash(
+            sample_text + str(file_size) + os.path.basename(file_path)
+        )
+        existing = _doc_db.query(DBDocument).filter(DBDocument.content_hash == content_hash).first()
+        if existing:
+            doc_id = str(existing.id)
+            logger.info("node_extract_hierarchy: reusing existing doc %s", doc_id)
+        elif not _doc_db.query(DBDocument).filter(DBDocument.id == doc_id).first():
+            clean_filename = os.path.basename(file_path)
+            new_doc = DBDocument(
+                id=doc_id,
+                filename=clean_filename,
+                title=clean_filename,
+                content_hash=content_hash,
+            )
+            _doc_db.add(new_doc)
+            _doc_db.commit()
+            logger.info("node_extract_hierarchy: created document record %s", doc_id)
+    except Exception as e:
+        logger.error("node_extract_hierarchy: failed to ensure document record: %s", e)
+    finally:
+        _doc_db.close()
+
     # Read up to 10 pages (or total_pages if already set) to sample document content
     max_pages = state.get("total_pages") or _ingestion().get_page_count(file_path)
     text_parts: List[str] = []
@@ -343,13 +503,37 @@ def node_extract_hierarchy(state: GraphState):
             break
     full_text = "\n\n".join(text_parts)
 
+    # Build existing_structure_text from topics already indexed for this document
+    # so the CuratorAgent can produce specific chapter-level topics (e.g.
+    # "D and F Block Elements") rather than generic domain labels ("Chemistry").
+    _ex_db = SessionLocal()
     try:
-        result = _curator().curate_structure(full_text)
+        existing_topics = (
+            _ex_db.query(Topic)
+            .filter(Topic.document_id == doc_id)
+            .all()
+        )
+        if existing_topics:
+            lines = []
+            for t in existing_topics:
+                subs = _ex_db.query(Subtopic).filter(Subtopic.topic_id == t.id).all()
+                sub_names = ", ".join(s.name for s in subs) if subs else "none"
+                lines.append(f"- {t.name}: {sub_names}")
+            existing_structure_text = "\n".join(lines)
+        else:
+            existing_structure_text = "No existing topics."
+    except Exception:
+        existing_structure_text = "No existing topics."
+    finally:
+        _ex_db.close()
+
+    try:
+        result = _curator().curate_structure(full_text, existing_structure_text)
     except Exception as e:
         logger.warning(
             "CuratorAgent failed (%s) — falling back to per-chunk LLM topic assignment", e
         )
-        return {"subtopic_embeddings": [], "status_message": f"Hierarchy extraction failed: {e}"}
+        return {"doc_id": doc_id, "subtopic_embeddings": [], "status_message": f"Hierarchy extraction failed: {e}"}
 
     # Persist topics and subtopics; collect metadata for embedding
     db = SessionLocal()
@@ -388,13 +572,13 @@ def node_extract_hierarchy(state: GraphState):
     except Exception as e:
         db.rollback()
         logger.error("Failed to persist topic hierarchy: %s", e, exc_info=True)
-        return {"subtopic_embeddings": [], "status_message": f"Hierarchy persist failed: {e}"}
+        return {"doc_id": doc_id, "subtopic_embeddings": [], "status_message": f"Hierarchy persist failed: {e}"}
     finally:
         db.close()
 
     if not subtopic_meta:
         logger.warning("CuratorAgent returned empty hierarchy — falling back to per-chunk LLM.")
-        return {"subtopic_embeddings": [], "hierarchy": hierarchy, "status_message": "Empty hierarchy."}
+        return {"doc_id": doc_id, "subtopic_embeddings": [], "hierarchy": hierarchy, "status_message": "Empty hierarchy."}
 
     # Embed subtopic names + summaries using the local ONNX model (no network call)
     embed_texts = [
@@ -412,6 +596,7 @@ def node_extract_hierarchy(state: GraphState):
         len(subtopic_embeddings),
     )
     return {
+        "doc_id": doc_id,   # may have been updated to an existing doc's id
         "hierarchy": hierarchy,
         "subtopic_embeddings": subtopic_embeddings,
         "status_message": f"Extracted {len(subtopic_embeddings)} subtopic(s) for {doc_id}.",
@@ -431,7 +616,7 @@ def node_assign_topic(state: GraphState):
     chunk_text = state["chunks"][idx]
     doc_id = state["doc_id"]
     hierarchy = state.get("hierarchy", [])
-    pending = list(state.get("pending_qdrant_docs", []))
+    pending = list(state.get("pending_vector_docs", []))
     subtopic_embeddings = state.get("subtopic_embeddings") or []
 
     assigned_subtopic_id = None
@@ -497,7 +682,7 @@ def node_assign_topic(state: GraphState):
         pending.append({"text": chunk_text, "metadata": {"document_id": doc_id, "db_chunk_id": new_chunk.id}})
         return {
             "hierarchy": hierarchy,
-            "pending_qdrant_docs": pending,
+            "pending_vector_docs": pending,
             "status_message": f"Indexed chunk to subtopic id={assigned_subtopic_id}",
         }
     except Exception as e:
@@ -505,30 +690,23 @@ def node_assign_topic(state: GraphState):
         logger.error("Error persisting chunk %d for doc %s: %s", idx, doc_id, e, exc_info=True)
         return {
             "hierarchy": hierarchy,
-            "pending_qdrant_docs": pending,
+            "pending_vector_docs": pending,
             "status_message": f"Warning: failed to index chunk {idx} — {e}",
         }
     finally:
         db.close()
 
 
-def _flush_qdrant_batch(pending_docs: List[Dict[str, Any]]):
-    """Upserts a batch of pending docs to Qdrant in a single call."""
+def _flush_vector_batch(pending_docs: List[Dict[str, Any]]):
+    """Upserts a batch of pending docs to the configured vector store."""
     if not pending_docs:
         return
-    from langchain_core.documents import Document as LCDoc
-    from langchain_qdrant import QdrantVectorStore
-    from core.config import settings
-    lc_docs = [LCDoc(page_content=d["text"], metadata=d["metadata"]) for d in pending_docs]
+
     try:
-        QdrantVectorStore.from_documents(
-            lc_docs,
-            _ingestion().embeddings,
-            url=settings.QDRANT_URL,
-            collection_name=_ingestion().collection_name,
-        )
+        store = get_vector_store()
+        store.upsert_chunks(pending_docs)
     except Exception as e:
-        logger.error(f"Qdrant batch flush failed ({len(pending_docs)} docs): {e}", exc_info=True)
+        logger.error(f"Vector batch flush failed ({len(pending_docs)} docs): {e}", exc_info=True)
         raise
 
 def node_generate(state: GraphState):
@@ -543,34 +721,85 @@ def node_generate(state: GraphState):
     chunk_data = state["chunks"][idx]
     subject_id = state["subject_id"]
     question_type = state.get("question_type", "active_recall")
+    topic_id = chunk_data.get("topic_id")
     initial_status = "approved" if settings.AUTO_ACCEPT_CONTENT else "pending"
+
+    # Hard card-level cap per (subject, topic, question_type).
+    # node_ingest pre-filters chunks, but SocraticAgent returns 1-3 cards per chunk
+    # so the chunk limit alone doesn't bound total cards.  Query current count once
+    # per chunk (includes cards written earlier in this run) and stop saving once
+    # the topic hits the limit.
+    _topic_limit = min(max(int(settings.MAX_CARDS_PER_TOPIC_TYPE), 1), 50)
+    _cards_already = 0
+    if subject_id and topic_id:
+        from sqlalchemy import func as _func
+        _ldb = SessionLocal()
+        try:
+            _cards_already = (
+                _ldb.query(_func.count(Flashcard.id))
+                .filter(
+                    Flashcard.subject_id == subject_id,
+                    Flashcard.topic_id == topic_id,
+                    Flashcard.question_type == question_type,
+                    Flashcard.status.in_(["approved", "pending"]),
+                )
+                .scalar() or 0
+            )
+        finally:
+            _ldb.close()
 
     drafts = _socratic().generate_flashcard(
         source_text=chunk_data["text"],
         question_type=question_type,
     )
 
+    logger.info(
+        "DIAG node_generate: chunk idx=%d subject_id=%s topic_id=%s subtopic_id=%s drafts=%d "
+        "cards_already=%d limit=%d initial_status=%s",
+        idx, subject_id, topic_id, chunk_data.get("subtopic_id"),
+        len(drafts) if drafts else 0, _cards_already, _topic_limit, initial_status,
+    )
     new_cards = []
+    _cards_saved = 0
     if drafts:
         fc_repo = FlashcardRepo()
         for draft in drafts:
-            saved = fc_repo.create(
-                subject_id=subject_id,
-                subtopic_id=chunk_data.get("subtopic_id"),
-                chunk_id=chunk_data["id"],
-                question=draft.question,
-                answer=draft.answer,
-                question_type=draft.question_type,
-                rubric_json=draft.rubric_json,
-                status=initial_status,
-            )
-            new_cards.append({
-                "flashcard_id": saved["id"],
-                "question": saved["question"],
-                "answer": saved["answer"],
-                "question_type": saved["question_type"],
-                "suggested_complexity": draft.suggested_complexity,
-            })
+            if _cards_already + _cards_saved >= _topic_limit:
+                logger.info(
+                    "node_generate: topic %s at card limit (%d already + %d this chunk >= %d) "
+                    "— skipping remaining draft(s)",
+                    topic_id, _cards_already, _cards_saved, _topic_limit,
+                )
+                break
+            try:
+                saved = fc_repo.create(
+                    subject_id=subject_id,
+                    topic_id=chunk_data.get("topic_id"),
+                    subtopic_id=chunk_data.get("subtopic_id"),
+                    chunk_id=chunk_data["id"],
+                    question=draft.question,
+                    answer=draft.answer,
+                    question_type=draft.question_type,
+                    rubric_json=draft.rubric_json,
+                    status=initial_status,
+                )
+                logger.info(
+                    "DIAG node_generate: saved flashcard id=%s subject_id=%s subtopic_id=%s status=%s",
+                    saved["id"], saved["subject_id"], saved["subtopic_id"], saved["status"],
+                )
+                new_cards.append({
+                    "flashcard_id": saved["id"],
+                    "question": saved["question"],
+                    "answer": saved["answer"],
+                    "question_type": saved["question_type"],
+                    "suggested_complexity": draft.suggested_complexity,
+                })
+                _cards_saved += 1
+            except Exception as _fc_err:
+                logger.error(
+                    "DIAG node_generate: fc_repo.create() FAILED for chunk %d: %s",
+                    chunk_data.get("id"), _fc_err, exc_info=True,
+                )
 
     return {
         "generated_flashcards": state.get("generated_flashcards", []) + new_cards,
@@ -625,15 +854,15 @@ def node_increment(state: GraphState):
 
 
 def node_next_page(state: GraphState):
-    """Flushes the Qdrant batch for the completed page, then advances."""
-    _flush_qdrant_batch(state.get("pending_qdrant_docs", []))
-    return {"current_page": state["current_page"] + 1, "pending_qdrant_docs": []}
+    """Flushes the vector batch for the completed page, then advances."""
+    _flush_vector_batch(state.get("pending_vector_docs", []))
+    return {"current_page": state["current_page"] + 1, "pending_vector_docs": []}
 
 
-def node_flush_qdrant(state: GraphState):
-    """Flushes the final Qdrant batch at the end of INDEXING (last page)."""
-    _flush_qdrant_batch(state.get("pending_qdrant_docs", []))
-    return {"pending_qdrant_docs": [], "status_message": "Document indexing complete."}
+def node_flush_vectors(state: GraphState):
+    """Flushes the final vector batch at the end of INDEXING (last page)."""
+    _flush_vector_batch(state.get("pending_vector_docs", []))
+    return {"pending_vector_docs": [], "status_message": "Document indexing complete."}
 
 # 4. Build Graph
 workflow = StateGraph(GraphState)
@@ -646,7 +875,7 @@ workflow.add_node("generate", node_generate)
 workflow.add_node("critic", node_critic)
 workflow.add_node("increment", node_increment)
 workflow.add_node("next_page", node_next_page)
-workflow.add_node("flush_qdrant", node_flush_qdrant)
+workflow.add_node("flush_vectors", node_flush_vectors)
 
 # match_topics is a no-op for INDEXING; for GENERATION it resolves topic names
 # to subtopic IDs before node_ingest loads the chunk list.
@@ -676,22 +905,34 @@ workflow.add_edge("critic", "increment")
 def router_after_increment(state: GraphState):
     idx = state["current_chunk_index"]
     chunks = state.get("chunks", [])
+
+    if state["mode"] == "GENERATION":
+        # Card limit: configurable via MAX_CARDS_PER_PDF, hard cap of 50.
+        _limit = min(max(int(settings.MAX_CARDS_PER_PDF), 1), 50)
+        _total = len(state.get("generated_flashcards", []))
+        if _total >= _limit:
+            logger.info(
+                "Generation limit reached: %d/%d cards — stopping early.",
+                _total, _limit,
+            )
+            return END
+
     if idx < len(chunks):
         return "assign_topic" if state["mode"] == "INDEXING" else "generate"
     if state["mode"] == "INDEXING":
         if state["current_page"] < state["total_pages"] - 1:
             return "next_page"
-        return "flush_qdrant"  # last page: flush batch before END
+        return "flush_vectors"  # last page: flush batch before END
     return END
 
 
 workflow.add_conditional_edges(
     "increment", router_after_increment,
     {"assign_topic": "assign_topic", "generate": "generate",
-     "next_page": "next_page", "flush_qdrant": "flush_qdrant", END: END},
+     "next_page": "next_page", "flush_vectors": "flush_vectors", END: END},
 )
 
 workflow.add_edge("next_page", "ingest")
-workflow.add_edge("flush_qdrant", END)
+workflow.add_edge("flush_vectors", END)
 
 phase1_graph = workflow.compile()

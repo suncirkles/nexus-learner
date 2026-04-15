@@ -5,13 +5,22 @@ Dashboard page — subject tiles with stats and quick navigation.
 Moved verbatim from app.py::render_dashboard() — zero behaviour change.
 """
 
+import logging
+import time
+
+import httpx
 import streamlit as st
 
 from ui import api_client
 
+logger = logging.getLogger(__name__)
 
-@st.cache_data(ttl=30)
-def _get_dashboard_data() -> tuple:
+# Modal cold starts for heavy Python containers can take 60-120 s.
+_MAX_RETRIES = 15       # 15 × 6 s = up to 90 s of auto-waiting
+_RETRY_INTERVAL_S = 6
+
+
+def _fetch_dashboard_data() -> tuple:
     """Returns (subjects_data, topic_counts, fc_stats, global_stats). 2 API calls total."""
     subjects = api_client.get_subjects_with_stats()  # 1 call (3 DB queries)
     global_stats = api_client.get_global_stats()     # 1 call
@@ -29,7 +38,45 @@ def _get_dashboard_data() -> tuple:
 def render_dashboard():
     st.header("🏠 Agentic Learning Dashboard")
 
-    subjects_data, topic_counts, fc_stats, global_stats = _get_dashboard_data()
+    # --- API cold-start resilience -------------------------------------------
+    # Modal FastAPI containers can take 60-120 s to cold-start.  Auto-retry
+    # with a spinner so the user doesn't have to keep clicking Retry.
+    retry_count = st.session_state.get("_api_cold_start_retries", 0)
+
+    try:
+        subjects_data, topic_counts, fc_stats, global_stats = _fetch_dashboard_data()
+        # Success — clear the retry counter
+        st.session_state.pop("_api_cold_start_retries", None)
+    except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError) as exc:
+        logger.warning("Dashboard API unavailable (attempt %d): %s", retry_count + 1, exc)
+        if retry_count < _MAX_RETRIES:
+            st.session_state["_api_cold_start_retries"] = retry_count + 1
+            elapsed = retry_count * _RETRY_INTERVAL_S
+            st.info(
+                f"API is starting up — attempt {retry_count + 1}/{_MAX_RETRIES} "
+                f"({elapsed}s elapsed). Retrying in {_RETRY_INTERVAL_S}s…",
+                icon="⏳",
+            )
+            time.sleep(_RETRY_INTERVAL_S)
+            st.rerun()
+        else:
+            st.session_state.pop("_api_cold_start_retries", None)
+            st.error(
+                "API did not respond after 90 s. Check Modal deployment logs for errors.",
+                icon="❌",
+            )
+            st.code(str(exc))
+            if st.button("🔄 Try again", key="dashboard_retry_exhausted"):
+                st.rerun()
+        return
+    except Exception as exc:
+        logger.error("Dashboard data fetch failed: %s", exc)
+        st.session_state.pop("_api_cold_start_retries", None)
+        st.error(f"Could not load dashboard data: {exc}")
+        if st.button("🔄 Retry", key="dashboard_retry_err"):
+            st.rerun()
+        return
+    # -------------------------------------------------------------------------
 
     if not subjects_data:
         st.info("No subjects found. Head over to 'Study Materials' to define your first subject and upload documents!")
@@ -75,8 +122,7 @@ def render_dashboard():
                             st.session_state.study_subject_id = subj_id
                             if "study_topic_id" in st.session_state: del st.session_state.study_topic_id
                             if "study_subtopic_id" in st.session_state: del st.session_state.study_subtopic_id
-                            st.session_state.active_nav = "🧠 Learner"
-                            st.session_state.sidebar_nav = "🧠 Learner"
+                            st.session_state.pending_nav = "🧠 Learner"
                             st.rerun()
 
     with col_stats:

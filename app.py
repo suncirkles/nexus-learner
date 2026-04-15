@@ -107,6 +107,10 @@ def main():
     if "sidebar_nav" not in st.session_state:
         st.session_state.sidebar_nav = nav_options[0]
 
+    # Consume any pending programmatic navigation before the radio is rendered
+    if "pending_nav" in st.session_state:
+        st.session_state.sidebar_nav = st.session_state.pop("pending_nav")
+
     # Radio is the single source of truth for navigation
     active_nav = st.sidebar.radio("Navigation", nav_options, key="sidebar_nav")
     st.session_state.active_nav = active_nav

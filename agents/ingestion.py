@@ -1,22 +1,30 @@
 """
 agents/ingestion.py
 --------------------
-Handles document ingestion: PDF text extraction (with OCR fallback),
-content hashing for duplicate detection, text chunking, relational DB
-persistence, and vector embedding into Qdrant.
+Responsibility: Extract raw text from documents (PDF via PyMuPDF, OCR fallback via
+Tesseract), split into chunks, deduplicate via content hash, persist to the relational
+DB, and embed chunks into Qdrant or PGVector.
+
+Do Not:
+- Classify, label, or assign topic/subtopic information to chunks (TopicAssignerAgent).
+- Generate flashcards or evaluate content quality (SocraticAgent / CriticAgent).
+- Scrape or fetch content from URLs (WebResearcherAgent).
+- Make decisions about whether a chunk is relevant to a study topic (RelevanceAgent).
+- Interpret the educational meaning of the text — treat it as opaque bytes to be stored.
 """
 
 import fitz  # PyMuPDF
 import pytesseract
 from PIL import Image
 import os
-from typing import List, Optional
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
-from core.config import settings
 import hashlib
 import logging
+from typing import List, Optional
+
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from core.config import settings
 from repositories.sql.document_repo import DocumentRepo
+from repositories.vector.factory import get_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -26,52 +34,15 @@ if os.path.exists(_TESSERACT_WIN):
     pytesseract.pytesseract.tesseract_cmd = _TESSERACT_WIN
 
 
-def _is_real_openai_key(key: str) -> bool:
-    """True if the key looks like a real OpenAI key, not a placeholder."""
-    return bool(key) and key.startswith("sk-") and len(key) > 20
-
-
-def _make_embeddings():
-    """Return (embeddings, collection_name).
-
-    Provider is controlled by settings.EMBEDDING_PROVIDER:
-    - "openai"      : OpenAIEmbeddings (requires a valid key, 1536-dim collection)
-    - "huggingface" : local all-MiniLM-L6-v2 (no key, 384-dim, "_hf" collection suffix)
-
-    If provider="openai" but the key is absent/placeholder, auto-falls back to
-    HuggingFace with a warning so CI stays green without an OpenAI account.
-    """
-    use_hf = settings.EMBEDDING_PROVIDER.lower() == "huggingface"
-
-    if not use_hf:
-        if _is_real_openai_key(settings.OPENAI_API_KEY):
-            return OpenAIEmbeddings(api_key=settings.OPENAI_API_KEY), settings.QDRANT_COLLECTION_NAME
-        logger.warning(
-            "EMBEDDING_PROVIDER=openai but key is absent/invalid — "
-            "falling back to HuggingFace embeddings"
-        )
-
-    try:
-        from core.embeddings import FastEmbedEmbeddings
-        logger.info("Using FastEmbed all-MiniLM-L6-v2 embeddings (384 dims, ONNX)")
-        embeddings = FastEmbedEmbeddings()
-        collection = settings.QDRANT_COLLECTION_NAME + "_hf"
-        return embeddings, collection
-    except Exception as e:
-        raise ValueError(
-            "FastEmbed embeddings unavailable. "
-            "Install with: pip install 'qdrant-client[fastembed]'. "
-            f"Original error: {e}"
-        )
-
-
 class IngestionAgent:
     def __init__(self):
-        self.embeddings, self.collection_name = _make_embeddings()
+        self._vector_store = get_vector_store()
+        self.embeddings = self._vector_store.embeddings
+        self.collection_name = self._vector_store.collection_name
         
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
+            chunk_size=settings.CHUNK_SIZE,
+            chunk_overlap=settings.CHUNK_OVERLAP,
             length_function=len,
             is_separator_regex=False,
         )
@@ -93,80 +64,125 @@ class IngestionAgent:
             logger.warning(f"OCR failed for image {file_path}: {e}")
             return ""
 
-    def load_page_text(self, file_path: str, page_num: int) -> str:
-        """Extracts text from a single PDF page with OCR fallback."""
+    def load_page_text(self, file_path: str, page_number: int) -> str:
+        """Loads text from a specific page of a PDF, with OCR fallback.
+
+        For non-PDF files (images), delegates to extract_text_from_image()
+        for page_number=0 and returns "" for any other page.
+        """
         if not file_path.lower().endswith('.pdf'):
-            if page_num > 0: return ""
-            return self.extract_text_from_image(file_path)
-            
-        with fitz.open(file_path) as doc:
-            if page_num >= len(doc):
-                return ""
-                
-            page = doc.load_page(page_num)
-            text = page.get_text("text")
-            
-            if len(text.strip()) < 50:
-                try:
-                    pix = page.get_pixmap()
-                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                    text = pytesseract.image_to_string(img)
-                except Exception as e:
-                    logger.warning(f"OCR failed for page {page_num}: {e}")
-            
-        return text
+            if page_number == 0:
+                return self.extract_text_from_image(file_path)
+            return ""
+
+        try:
+            with fitz.open(file_path) as doc:
+                if page_number >= len(doc):
+                    return ""
+                page = doc.load_page(page_number)
+                text = page.get_text()
+
+                # Sparse text (< 50 chars) likely indicates a scanned page — try OCR.
+                if len(text.strip()) < 50:
+                    try:
+                        pix = page.get_pixmap()
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        text = pytesseract.image_to_string(img)
+                    except Exception as ocr_err:
+                        logger.warning(f"OCR failed for page {page_number} of {file_path}: {ocr_err}")
+
+            return text
+        except Exception as e:
+            logger.error(f"Failed to load text from page {page_number} of {file_path}: {e}")
+            return ""
 
     def get_content_hash(self, text: str) -> str:
-        """Generates a SHA256 hash of the text content."""
+        """Returns a stable SHA-256 hash of the text content."""
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
-    def create_document_record(self, file_path: str, doc_id: str, subject_id: Optional[int] = None) -> dict:
-        """Creates a document record in the database if it doesn't exist.
-
-        Returns a dict with document fields (id, filename, title, content_hash, …).
-        Uses DocumentRepo — no direct SessionLocal import in the agent.
-        """
+    def create_document_record(self, file_path: str, subject_id: Optional[int] = None) -> str:
+        """Creates a Document record and associates it with a Subject."""
+        # Use a sample of text + file size + filename for the hash
         sample_text = self.load_page_text(file_path, 0)[:10000]
         file_size = os.path.getsize(file_path) if os.path.exists(file_path) else 0
-        content_hash = self.get_content_hash(sample_text + str(file_size) + os.path.basename(file_path))
 
-        doc_repo = DocumentRepo()
-        existing = doc_repo.get_by_content_hash(content_hash)
-        if existing:
-            return existing
+        raw_basename = os.path.basename(file_path)
+        # Strip the UUID prefix added by upload_and_spawn: "{uuid4}_{original_name}"
+        # UUID4 is exactly 36 chars with 4 hyphens; the separator is an underscore.
+        _parts = raw_basename.split("_", 1)
+        if len(_parts) == 2 and len(_parts[0]) == 36 and _parts[0].count("-") == 4:
+            filename = _parts[1]
+        else:
+            filename = raw_basename
 
-        uploaded_filename = os.path.basename(file_path)
-        title = uploaded_filename
-        try:
-            from core.context import get_langchain_config
-            from core.models import invoke_with_retry
-            title_llm = get_llm(purpose="primary", temperature=0)
-            title_prompt = ChatPromptTemplate.from_template(
-                "Generate a short, professional title (max 5 words) for a document with the following content sample:\n\n{summary}"
+        content_hash = self.get_content_hash(sample_text + str(file_size) + filename)
+
+        repo = DocumentRepo()
+        doc = repo.get_by_content_hash(content_hash)
+
+        if not doc:
+            import uuid
+            doc_id = str(uuid.uuid4())
+            doc = repo.create(
+                doc_id=doc_id,
+                filename=filename,
+                title=filename,
+                content_hash=content_hash
             )
-            title_res = invoke_with_retry(
-                (title_prompt | title_llm).invoke,
-                {"summary": sample_text[:2000]},
-                config=get_langchain_config()
-            )
-            title = title_res.content.strip().strip('"')
-        except Exception as e:
-            logger.warning(f"Title generation failed: {e}")
-
-        new_doc = doc_repo.create(
-            doc_id=doc_id,
-            filename=uploaded_filename,
-            title=title,
-            content_hash=content_hash,
-        )
+        
         if subject_id:
-            doc_repo.attach_to_subject(new_doc["id"], subject_id)
-        return new_doc
+            repo.attach_to_subject(doc["id"], subject_id)
+            
+        return doc["id"]
 
-    def ingest_text_chunk(self, doc_id: str, text: str) -> List[str]:
-        """Splits text into chunks. Pure — no DB writes, no Qdrant.
+    def process_and_store(self, text: str, document_id: str, page_number: Optional[int] = None) -> List[int]:
+        """Chunks text, persists to SQL, and embeds into the vector store.
 
-        Phase 2b: DB persistence is the caller's responsibility (use ChunkRepo.create_batch).
-        Qdrant embedding is the caller's responsibility (use QdrantStore.upsert_chunks).
+        SQL rows and the vector upsert are committed together: the single
+        db.commit() only fires after upsert_chunks() succeeds, so a vector
+        store failure leaves no orphaned SQL rows.
         """
-        return self.text_splitter.split_text(text)
+        chunks = self.text_splitter.split_text(text)
+
+        from core.database import SessionLocal, ContentChunk
+        db = SessionLocal()
+        db_chunks = []
+        vector_data = []
+
+        try:
+            # Stage all rows — no commit yet.
+            for text_chunk in chunks:
+                db_chunk = ContentChunk(
+                    document_id=document_id,
+                    text=text_chunk,
+                    page_number=page_number
+                )
+                db.add(db_chunk)
+                db_chunks.append(db_chunk)
+
+            # Flush assigns auto-increment IDs without committing the transaction.
+            db.flush()
+
+            for db_chunk in db_chunks:
+                vector_data.append({
+                    "text": db_chunk.text,
+                    "metadata": {
+                        "document_id": document_id,
+                        "db_chunk_id": db_chunk.id,
+                        "page_number": page_number,
+                    }
+                })
+
+            # Vector upsert first — if it raises, the transaction rolls back on close.
+            self._vector_store.upsert_chunks(vector_data)
+
+            # Both writes succeeded — commit once.
+            db.commit()
+
+            return [c.id for c in db_chunks]
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to process and store chunks for doc {document_id}: {e}")
+            raise
+        finally:
+            db.close()

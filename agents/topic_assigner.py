@@ -1,9 +1,17 @@
 """
 agents/topic_assigner.py
 -------------------------
-Agent for mapping text chunks to specific topics and subtopics.
-Enforces the "No General Content" policy by finding the best semantic match
-among existing topics or identifying a new descriptive topic.
+Responsibility: Map each text chunk to exactly one existing subtopic, or propose
+a new descriptive subtopic name when no match exists. Enforces the "No General
+Content" policy — every chunk must belong to a specific subtopic.
+
+Do Not:
+- Build or restructure the topic hierarchy (CuratorAgent's job).
+- Match user study-intent topics to indexed subtopics (TopicMatcherAgent).
+- Filter chunks by relevance to a study session (RelevanceAgent).
+- Generate flashcards or evaluate content (SocraticAgent / CriticAgent).
+- Rename or merge existing subtopics; only select from the provided list or
+  propose a net-new name — never modify what already exists.
 """
 
 import logging

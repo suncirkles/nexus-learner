@@ -1,11 +1,49 @@
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
+  # ---------------------------------------------------------------------------
+  # Dev database — PostgreSQL + pgvector for local development.
+  # Mirrors the Supabase schema so you can develop without hitting the cloud.
+  # Start with: docker-compose up -d db
+  # Connect URL:  postgresql://postgres:postgres@localhost:5432/nexus_dev
+  # ---------------------------------------------------------------------------
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: nexus_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     ports:
-      - "6333:6333"
+      - "5432:5432"
     volumes:
-      - ./qdrant_data:/qdrant/storage
+      - pg_data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nexus_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Test database — isolated PostgreSQL for the test suite.
+  # Data lives in tmpfs (RAM): fast, automatically wiped on container stop.
+  # Start with: docker-compose up -d test-db
+  # Connect URL:  postgresql://postgres:postgres@localhost:5433/nexus_test
+  # ---------------------------------------------------------------------------
+  test-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: nexus_test
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5433:5432"    # 5433 avoids clash with local dev postgres on 5432
+    tmpfs:
+      - /var/lib/postgresql/data   # ephemeral — wiped on stop, no disk clutter
+    restart: "no"                  # never auto-restart; start explicitly for test runs
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d nexus_test"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:alpine
@@ -21,15 +59,21 @@ services:
       - "8000:8000"
     env_file: .env
     environment:
-      - QDRANT_URL=http://qdrant:6333
+      # Override .env to point at local services instead of cloud
+      - DB_URL=postgresql://postgres:postgres@db:5432/nexus_dev
       - REDIS_URL=redis://redis:6379
+      - VECTOR_STORE_TYPE=pgvector
       - WATCHFILES_FORCE_POLLING=true
       - ANTHROPIC_API_KEY
     volumes:
       - .:/app
+      - uploads:/app/uploads
+      - page_cache:/app/page_cache
     depends_on:
-      - qdrant
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
 
   ui:
     image: nexus-learner:latest
@@ -39,10 +83,14 @@ services:
     env_file: .env
     environment:
       - API_BASE_URL=http://api:8000
-      - QDRANT_URL=http://qdrant:6333
       - REDIS_URL=redis://redis:6379
       - ANTHROPIC_API_KEY
     volumes:
       - .:/app
     depends_on:
       - api
+
+volumes:
+  pg_data:
+  uploads:
+  page_cache:

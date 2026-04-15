@@ -21,7 +21,6 @@ import uuid
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langchain_core.documents import Document as LCDocument
-from langchain_qdrant import QdrantVectorStore
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.graph import END, START, StateGraph
@@ -310,18 +309,21 @@ def node_ingest_web_document(state: GraphState) -> dict:
         )
         lc_documents.append(lc_doc)
 
-    # --- Embed into Qdrant ---
-    # C20: if Qdrant fails, log clearly so caller knows chunks exist in SQLite but have no vectors
+    # --- Embed into Vector Store ---
     try:
-        QdrantVectorStore.from_documents(
-            lc_documents,
-            _get_embeddings(),
-            url=settings.QDRANT_URL,
-            collection_name=settings.QDRANT_COLLECTION_NAME,
-        )
+        from repositories.vector.factory import get_vector_store
+        store = get_vector_store()
+        
+        # Prepare list of dicts for the store.upsert_chunks interface
+        chunks_data = [
+            {"text": doc.page_content, "metadata": doc.metadata}
+            for doc in lc_documents
+        ]
+        store.upsert_chunks(chunks_data)
+        
     except Exception as exc:
         logger.error(
-            "Qdrant embedding failed for '%s' (%d chunks persisted in SQLite but NOT vectorised): %s",
+            "Vector embedding failed for '%s' (%d chunks persisted in SQL but NOT vectorised): %s",
             url, len(lc_documents), exc,
         )
 

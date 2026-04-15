@@ -1,131 +1,131 @@
 [
   {
     "id": "item_1",
-    "source_text": "Basic probability definition.",
+    "source_text": "The rate of a chemical reaction at a given temperature may depend on the concentration of one or more reactants and products. The representation of rate of reaction in terms of concentration of the reactants is known as rate law. It is also called as rate equation or rate expression. Consider a general reaction: aA + bB → cC + dD. The rate expression is: Rate = k[A]^x [B]^y, where k is the rate constant and x, y are the orders with respect to A and B respectively. The sum of powers x + y gives the overall order of the reaction. The rate constant k is a proportionality constant specific to a particular reaction at a given temperature. Rate law for any reaction cannot be predicted by merely looking at the balanced chemical equation but must be determined experimentally.",
     "target_question_type": "active_recall",
-    "expected_complexity": "simple",
-    "topic": "Fundamentals of Probability",
-    "subtopic": "Definitions and Terminology"
+    "expected_complexity": "medium",
+    "topic": "Chemical Kinetics",
+    "subtopic": "Rate Law and Rate Expression"
   },
   {
     "id": "item_2",
-    "source_text": "Basic probability definition.",
+    "source_text": "It has been found that for a chemical reaction with rise in temperature by 10 degrees, the rate constant is nearly doubled. The temperature dependence of the rate of a chemical reaction can be accurately explained by Arrhenius equation: k = A * e^(-Ea/RT), where A is the Arrhenius factor (also called the frequency factor or pre-exponential factor), R is the gas constant, and Ea is the activation energy measured in joules per mole. Taking natural logarithm of both sides: ln k = -Ea/RT + ln A. A plot of ln k versus 1/T gives a straight line with slope = -Ea/R and intercept = ln A. Increasing the temperature or decreasing the activation energy will result in an increase in the rate of the reaction.",
     "target_question_type": "active_recall",
-    "expected_complexity": "simple",
-    "topic": "Fundamentals of Probability",
-    "subtopic": "Definitions and Terminology"
+    "expected_complexity": "medium",
+    "topic": "Chemical Kinetics",
+    "subtopic": "Arrhenius Equation and Temperature Dependence"
   },
   {
     "id": "item_3",
-    "source_text": "Basic probability definition.",
+    "source_text": "Driver Program: This is your main program. It is the brain that coordinates everything. When you write spark.read.csv(...), the Driver creates a plan for how to execute it. Cluster Manager: Think of this as the HR department. It manages resources (CPU, memory) across the cluster. Common options: YARN (Hadoop), Kubernetes, Mesos, or Standalone. Executors: These are the workers. Each executor runs on a separate machine and processes a chunk of your data. They do the actual computation. Tasks: The smallest unit of work. Each executor runs multiple tasks in parallel. If you have 100 partitions of data and 10 executors, each executor handles approximately 10 tasks. Flow: You write your code → Driver creates execution plan (DAG) → Cluster Manager allocates executors → Data is split into partitions → Each executor processes its partitions → Results are collected back to the Driver.",
     "target_question_type": "active_recall",
-    "expected_complexity": "simple",
-    "topic": "Fundamentals of Probability",
-    "subtopic": "Definitions and Terminology"
+    "expected_complexity": "medium",
+    "topic": "PySpark",
+    "subtopic": "Spark Architecture"
   },
   {
     "id": "item_4",
-    "source_text": "Basic probability definition.",
+    "source_text": "In a displacement reaction, a more reactive element replaces a less reactive element from a compound. When an iron nail is placed in a copper sulphate solution, iron displaces copper from copper sulphate solution forming iron sulphate, which is green in colour. The reaction is: Fe + CuSO4 → FeSO4 + Cu. Therefore, the blue colour of copper sulphate solution fades and green colour appears. In a double displacement reaction, two atoms or groups of atoms switch places to form two new compounds. For example: Na2CO3 + CaCl2 → CaCO3 + 2NaCl. Here, sodium and calcium exchange their anions to form two new compounds. Such reactions in which ions exchange between two reactants are called double displacement or metathesis reactions.",
     "target_question_type": "active_recall",
-    "expected_complexity": "simple",
-    "topic": "Fundamentals of Probability",
-    "subtopic": "Definitions and Terminology"
+    "expected_complexity": "medium",
+    "topic": "Chemical Reactions and Equations",
+    "subtopic": "Displacement and Double Displacement Reactions"
   },
   {
     "id": "item_5",
-    "source_text": "The sample space of an experiment is the set of all possible outcomes.",
+    "source_text": "The half-life of a reaction is the time in which the concentration of a reactant is reduced to one half of its initial concentration. It is represented as t1/2. For the first order reaction, the integrated rate equation is: ln[R] = -kt + ln[R]0. At t1/2, [R] = [R]0/2. Substituting into the integrated equation: ln([R]0/2) = -k * t1/2 + ln[R]0, which simplifies to: t1/2 = 0.693/k. It is notably independent of initial concentration — only the rate constant k determines it. For a zero order reaction by contrast, t1/2 = [R]0 / (2k), meaning half-life is directly proportional to the initial concentration. The half-life concept is widely used in radioactive decay calculations.",
     "target_question_type": "fill_blank",
     "expected_complexity": "medium",
-    "topic": "Fundamentals of Probability",
-    "subtopic": "Sample Spaces and Events"
+    "topic": "Chemical Kinetics",
+    "subtopic": "Half-Life of Reactions"
   },
   {
     "id": "item_6",
-    "source_text": "The sample space of an experiment is the set of all possible outcomes.",
+    "source_text": "The number of reacting species (atoms, ions or molecules) taking part in an elementary reaction and bringing about the chemical change is called molecularity of a reaction. Unimolecular reactions involve decomposition or rearrangement of a single reacting species; for example: NH4NO2 → N2 + 2H2O. Bimolecular reactions involve simultaneous collision between two species; for example: 2HI → H2 + I2. Trimolecular or termolecular reactions involve simultaneous collision between three reacting species; for example: 2NO + O2 → 2NO2. The probability that more than three molecules can collide and react simultaneously is very small. Hence, reactions with molecularity greater than three are extremely rare. Molecularity is applicable only for elementary reactions; for complex reactions it has no meaning.",
     "target_question_type": "fill_blank",
     "expected_complexity": "medium",
-    "topic": "Fundamentals of Probability",
-    "subtopic": "Sample Spaces and Events"
+    "topic": "Chemical Kinetics",
+    "subtopic": "Molecularity of Reactions"
   },
   {
     "id": "item_7",
-    "source_text": "The sample space of an experiment is the set of all possible outcomes.",
+    "source_text": "RDD stands for Resilient Distributed Dataset. It is the fundamental data structure in Spark. Think of it as an immutable, distributed collection of objects that can be processed in parallel. Resilient: If a partition of data is lost because a machine fails, Spark can recompute it from the original source using the lineage graph. Distributed: Data is split across multiple machines in the cluster. Dataset: A collection of records or rows of data. RDD operations fall into two categories: Transformations (lazy operations that define what to do but do NOT execute immediately — examples: map(), filter(), flatMap(), reduceByKey()) and Actions (operations that force Spark to execute the plan and return results — examples: collect(), count(), first(), saveAsTextFile()). In modern PySpark, DataFrames are preferred over RDDs because they benefit from the Catalyst optimizer.",
     "target_question_type": "fill_blank",
     "expected_complexity": "medium",
-    "topic": "Fundamentals of Probability",
-    "subtopic": "Sample Spaces and Events"
+    "topic": "PySpark",
+    "subtopic": "Resilient Distributed Datasets (RDDs)"
   },
   {
     "id": "item_8",
-    "source_text": "The sample space of an experiment is the set of all possible outcomes.",
+    "source_text": "A reaction which has an equal number of atoms of all the elements on both sides of the chemical equation is called a balanced chemical equation. The law of conservation of mass states that mass can neither be created nor destroyed in a chemical reaction. Hence, the total mass of reactants must equal the total mass of the products, meaning the total number of atoms of each element must be equal on both sides. For example, hydrogen gas combines with nitrogen to form ammonia: N2 + 3H2 → 2NH3. On the left side: 2 nitrogen atoms and 6 hydrogen atoms. On the right side: 2 nitrogen atoms and 6 hydrogen atoms. This equation is balanced. Another example: 2H2 + O2 → 2H2O — each side has 4 hydrogen atoms and 2 oxygen atoms.",
     "target_question_type": "fill_blank",
-    "expected_complexity": "medium",
-    "topic": "Fundamentals of Probability",
-    "subtopic": "Sample Spaces and Events"
+    "expected_complexity": "simple",
+    "topic": "Chemical Reactions and Equations",
+    "subtopic": "Balancing Chemical Equations"
   },
   {
     "id": "item_9",
-    "source_text": "550 500 450 400 350 300 250 200 150 100 50 0 Millions of dollars Source: Chart prepared by U.S. Bureau of the Census. Johns Hopkins University Mass. Institute of Technology Stanford University University of Washington University of Michigan University of CA–Los Angeles University of CA–San Diego University of CA–San Francisco University of Wisconsin–Madison Columbia University–Main Division University of Pennsylvania University of Minnesota Harvard University Yale University University of Pittsburgh",
+    "source_text": "The decomposition of N2O5 in CCl4 at 318 K has been studied by monitoring the concentration of N2O5 in the solution. Initially the concentration of N2O5 is 2.33 mol/L and after 184 minutes, it is reduced to 2.08 mol/L. The reaction takes place according to: 2N2O5(g) → 4NO2(g) + O2(g). The average rate is: Average Rate = -(1/2) * delta[N2O5] / delta_t = -(1/2) * (2.08 - 2.33) / 184 min = -(1/2) * (-0.25/184) = 6.79 * 10^-4 mol/L/min. Converting: 6.79 * 10^-4 mol/L/min * 60 min/h = 4.07 * 10^-2 mol/L/h. The rate of production of NO2 is 4 times the rate of disappearance of N2O5 (from stoichiometry), so rate of NO2 production = 4 * 6.79 * 10^-4 = 2.72 * 10^-3 mol/L/min.",
     "target_question_type": "numerical",
     "expected_complexity": "complex",
-    "topic": "Conditional Probability and Independence",
-    "subtopic": "Bayes' Theorem and Conditional Logic"
+    "topic": "Chemical Kinetics",
+    "subtopic": "Average Rate of Reaction"
   },
   {
     "id": "item_10",
-    "source_text": "P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2",
+    "source_text": "The initial concentration of N2O5 in the first order reaction N2O5(g) → 2NO2(g) + 1/2 O2(g) was 1.24 * 10^-2 mol/L at 318 K. The concentration of N2O5 after 60 minutes was 0.20 * 10^-2 mol/L. For a first order reaction, the rate constant k is calculated using: k = (2.303 / t) * log([R]0 / [R]). Substituting: k = (2.303 / 60 min) * log(1.24 * 10^-2 / 0.20 * 10^-2) = (2.303 / 60) * log(6.2) = (2.303 / 60) * 0.792 = 0.0304 min^-1. The units of k for a first order reaction are time^-1 (e.g., s^-1 or min^-1), confirming this is a first order reaction.",
     "target_question_type": "numerical",
     "expected_complexity": "complex",
-    "topic": "Conditional Probability and Independence",
-    "subtopic": "Bayes' Theorem and Conditional Logic"
+    "topic": "Chemical Kinetics",
+    "subtopic": "First Order Rate Constant"
   },
   {
     "id": "item_11",
-    "source_text": "P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2",
+    "source_text": "A first order reaction is found to have a rate constant k = 5.5 * 10^-14 s^-1. For a first order reaction, half-life is given by: t1/2 = 0.693 / k. Substituting: t1/2 = 0.693 / (5.5 * 10^-14 s^-1) = 1.26 * 10^13 s. It can be shown that for a first order reaction, the time required for completion of 99.9% of the reaction is 10 times the half-life. When 99.9% is complete: [R] = [R]0 - 0.999[R]0 = 0.001[R]0. So k = (2.303/t) * log([R]0/0.001[R]0) = (2.303/t) * log(1000) = 6.909/t, giving t = 6.909/k. Since t1/2 = 0.693/k, we have t/t1/2 = 6.909/0.693 = 10.",
     "target_question_type": "numerical",
     "expected_complexity": "complex",
-    "topic": "Conditional Probability and Independence",
-    "subtopic": "Bayes' Theorem and Conditional Logic"
+    "topic": "Chemical Kinetics",
+    "subtopic": "Half-Life Calculations"
   },
   {
     "id": "item_12",
-    "source_text": "P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2",
+    "source_text": "The rate constants of a reaction at 500 K and 700 K are 0.02 s^-1 and 0.07 s^-1 respectively. Using the Arrhenius equation at two temperatures: log(k2/k1) = (Ea / 2.303 R) * (T2 - T1) / (T1 * T2). Substituting: log(0.07/0.02) = Ea * (700 - 500) / (2.303 * 8.314 * 500 * 700). This gives: log(3.5) = 0.544 = Ea * 200 / (2.303 * 8.314 * 350000) = Ea * 5.714 * 10^-4 / 19.15. Solving: Ea = 0.544 * 19.15 / (5.714 * 10^-4) = 18230.8 J/mol approximately 18.2 kJ/mol. The pre-exponential factor A is then found from k = A * e^(-Ea/RT): 0.02 = A * e^(-18230.8 / (8.314 * 500)), giving A approximately 1.61.",
     "target_question_type": "numerical",
     "expected_complexity": "complex",
-    "topic": "Conditional Probability and Independence",
-    "subtopic": "Bayes' Theorem and Conditional Logic"
+    "topic": "Chemical Kinetics",
+    "subtopic": "Arrhenius Two-Temperature Calculation"
   },
   {
     "id": "item_13",
-    "source_text": "Consider a coin tossing game.",
+    "source_text": "A catalyst is a substance which increases the rate of a reaction without itself undergoing any permanent chemical change. For example, MnO2 catalyses the decomposition of KClO3: 2KClO3 → (MnO2 catalyst) 2KCl + 3O2. According to intermediate complex theory, a catalyst participates by forming temporary bonds with the reactants, creating an intermediate complex that decomposes to yield products and regenerates the catalyst. A catalyst provides an alternate pathway by reducing the activation energy between reactants and products. A catalyst does not alter the Gibbs energy (delta G) of a reaction — it catalyses only spontaneous reactions. It does not change the equilibrium constant but helps in attaining equilibrium faster by catalysing both the forward and backward reactions equally.",
     "target_question_type": "scenario",
     "expected_complexity": "medium",
-    "topic": "Applied Probability Models",
-    "subtopic": "Independent Trials and Games"
+    "topic": "Chemical Kinetics",
+    "subtopic": "Effect of Catalyst on Reaction Rate"
   },
   {
     "id": "item_14",
-    "source_text": "Consider a coin tossing game.",
+    "source_text": "Lazy evaluation is the single most important concept in PySpark. Unlike Pandas, PySpark does NOT execute your code line by line. Instead, it builds up a plan called a DAG (Directed Acyclic Graph) and only executes when you explicitly ask for a result. Transformations are lazy operations that define what to do but do NOT execute: filter(), select(), groupBy(), join(), withColumn(). These just add steps to the plan. Actions trigger execution: show(), count(), collect(), write(). Example: df = spark.read.csv('huge_file.csv') then filtered = df.filter(col('age') > 25) then grouped = filtered.groupBy('department').count() — none of these execute yet. Only grouped.show() triggers execution of the entire chain. This design allows Spark to optimize the full query plan (e.g., predicate pushdown, column pruning) before any data is actually read.",
     "target_question_type": "scenario",
     "expected_complexity": "medium",
-    "topic": "Applied Probability Models",
-    "subtopic": "Independent Trials and Games"
+    "topic": "PySpark",
+    "subtopic": "Lazy Evaluation and DAG Execution"
   },
   {
     "id": "item_15",
-    "source_text": "Consider a coin tossing game.",
+    "source_text": "Chemical reactions that release energy in the form of heat, light, or sound are called exothermic reactions. Reactions that absorb energy or require energy in order to proceed are called endothermic reactions. Magnesium is very reactive. When stored, it reacts with oxygen to form a layer of magnesium oxide (MgO) on its surface. This oxide layer is stable and prevents further reaction — acting as a protective barrier (passivation). Rusting of iron is a slow exothermic oxidation reaction: iron reacts with oxygen and water forming hydrated iron(III) oxide (Fe2O3.xH2O). Corrosion can be prevented by painting, galvanisation (coating with zinc), or using stainless steel alloys. The process of coating iron/steel with zinc is called galvanisation, and it protects iron even when the coating is scratched, because zinc is more reactive and acts as a sacrificial anode.",
     "target_question_type": "scenario",
     "expected_complexity": "medium",
-    "topic": "Applied Probability Models",
-    "subtopic": "Independent Trials and Games"
+    "topic": "Chemical Reactions and Equations",
+    "subtopic": "Exothermic Reactions and Corrosion"
   },
   {
     "id": "item_16",
-    "source_text": "Consider a coin tossing game.",
+    "source_text": "Data in Spark is split across multiple machines through partitions. When you create an RDD using sc.parallelize(data, numSlices=4), data is divided into 4 partitions distributed across the cluster. If you have 100 partitions of data and 10 executors, each executor handles approximately 10 tasks in parallel. Writing partitioned data: df.write.mode('overwrite').partitionBy('year', 'month').parquet('output/partitioned/') creates a directory structure organised by year and month. Partitioned writes dramatically improve query performance because Spark can skip entire folders based on partition values — this is called partition pruning. Warning: Never use coalesce(1) on large datasets as it forces all data onto one partition (one machine), defeating the purpose of distributed computing and likely causing an OutOfMemoryError.",
     "target_question_type": "scenario",
     "expected_complexity": "medium",
-    "topic": "Applied Probability Models",
-    "subtopic": "Independent Trials and Games"
+    "topic": "PySpark",
+    "subtopic": "Partitioning and Data Distribution"
   },
   {
     "id": "item_17",

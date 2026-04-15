@@ -94,6 +94,7 @@ class TestCriticAgentAutoReject:
             with patch("agents.critic.settings") as mock_settings:
                 mock_settings.AUTO_ACCEPT_CONTENT = False
                 mock_settings.MODEL_HOP_ENABLED = False
+                mock_settings.CRITIC_REJECT_MIN_SCORE = 2
                 result = ag.evaluate_flashcard("text", "q", "a")
         assert result.should_reject is True
         assert "grounding" in result.reject_reason
@@ -105,6 +106,7 @@ class TestCriticAgentAutoReject:
             with patch("agents.critic.settings") as mock_settings:
                 mock_settings.AUTO_ACCEPT_CONTENT = False
                 mock_settings.MODEL_HOP_ENABLED = False
+                mock_settings.CRITIC_REJECT_MIN_SCORE = 2
                 result = ag.evaluate_flashcard("text", "q", "a")
         assert result.should_reject is True
         assert "clarity" in result.reject_reason
@@ -116,6 +118,7 @@ class TestCriticAgentAutoReject:
             with patch("agents.critic.settings") as mock_settings:
                 mock_settings.AUTO_ACCEPT_CONTENT = False
                 mock_settings.MODEL_HOP_ENABLED = False
+                mock_settings.CRITIC_REJECT_MIN_SCORE = 2
                 result = ag.evaluate_flashcard("text", "q", "a")
         assert result.should_reject is False
 
@@ -126,6 +129,7 @@ class TestCriticAgentAutoReject:
             with patch("agents.critic.settings") as mock_settings:
                 mock_settings.AUTO_ACCEPT_CONTENT = True
                 mock_settings.MODEL_HOP_ENABLED = False
+                mock_settings.CRITIC_REJECT_MIN_SCORE = 2
                 result = ag.evaluate_flashcard("text", "q", "a")
         assert result.should_reject is False
 

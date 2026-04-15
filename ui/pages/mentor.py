@@ -60,10 +60,10 @@ def _invalidate_tree(subject_id: int) -> None:
 
 
 def _invalidate_fc_cache(sub_id: int, status: str) -> None:
-    """Remove all page caches for a subtopic+status."""
-    keys = [k for k in st.session_state
-            if k.startswith(f"fc_cache_{sub_id}_{status}_")]
-    for k in keys:
+    """Clear all type-keyed page caches for a subtopic+status (used by bulk actions)."""
+    for k in [k for k in st.session_state if k.startswith(f"fc_cache_{sub_id}_{status}_")]:
+        del st.session_state[k]
+    for k in [k for k in st.session_state if k.startswith(f"fc_page_{sub_id}_{status}_")]:
         del st.session_state[k]
 
 

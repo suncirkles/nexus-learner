@@ -6,22 +6,26 @@ langchain-anthropic>=0.1.0
 langchain-groq>=0.2.0
 langchain-google-genai>=2.0.0
 langchain-litellm>=0.1.0
-langchain-qdrant>=0.1.0
 langgraph>=0.1.0
 langsmith>=0.1.59          # observability tracing
 litellm>=1.0.0
 
-# Vector DB — fastembed extra replaces sentence-transformers (ONNX, no PyTorch)
-qdrant-client[fastembed]>=1.9.0
+# Embeddings — fastembed (ONNX, no PyTorch) replaces sentence-transformers
+fastembed>=0.3.0
 
 # Storage / DB
 sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0       # PostgreSQL driver for Supabase
+# pgvector support
+pgvector>=0.2.0
+langchain-postgres>=0.0.12
 redis>=5.0                 # optional: Redis semantic cache backend (SEMANTIC_CACHE_BACKEND=redis)
 
 # API layer
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 httpx>=0.27.0
+python-multipart>=0.0.9      # required for FastAPI Form/File upload endpoints
 
 # Data validation
 pydantic>=2.0.0

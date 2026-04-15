@@ -1,8 +1,8 @@
 """
 core/cache.py
 -------------
-Semantic cache for LLM structured output, backed by Qdrant and
-all-MiniLM-L6-v2 (local, fastembed/ONNX, 384-dim).
+Semantic cache for LLM structured output backed by Redis (default) or Qdrant
+(legacy), using all-MiniLM-L6-v2 (fastembed/ONNX, 384-dim).
 
 Usage
 -----
@@ -16,7 +16,7 @@ Usage
 
 Graceful degradation
 --------------------
-If Qdrant is unavailable or fastembed is not installed,
+If the cache backend is unavailable or fastembed is not installed,
 ``get_cache()`` returns a ``_NullCache`` — all methods are no-ops.
 ``generate_structured()`` never fails due to cache errors.
 """
@@ -44,7 +44,7 @@ def _load_embedder(label: str):
     """Load all-MiniLM-L6-v2 via fastembed (ONNX, no PyTorch).
 
     Returns a FastEmbedEmbeddings instance, or None if fastembed is unavailable.
-    Requires qdrant-client[fastembed].
+    Requires fastembed>=0.3.0.
     """
     try:
         from core.embeddings import FastEmbedEmbeddings
@@ -53,7 +53,7 @@ def _load_embedder(label: str):
         return embedder
     except Exception as exc:
         logger.warning(
-            "%s: fastembed not available — install with: pip install 'qdrant-client[fastembed]'. Error: %s",
+            "%s: fastembed not available — install with: pip install fastembed. Error: %s",
             label,
             exc,
         )
@@ -598,14 +598,233 @@ class RedisSemanticCache:
 
 
 # ---------------------------------------------------------------------------
+# PGVector-backed semantic cache
+# ---------------------------------------------------------------------------
+
+class PGVectorSemanticCache:
+    """PGVector-backed semantic cache for Pydantic structured-output results.
+
+    Reuses the same PostgreSQL/Supabase instance as the vector store — no
+    extra infrastructure required.  Uses a dedicated collection
+    (``SEMANTIC_CACHE_COLLECTION``) so cache entries never mix with chunk
+    embeddings.
+
+    Similarity scores returned by langchain-postgres with cosine distance are
+    relevance scores in [0, 1] (higher = more similar), matching the existing
+    ``SEMANTIC_CACHE_THRESHOLD`` convention.
+    """
+
+    def __init__(
+        self,
+        db_url: str,
+        collection: str,
+        threshold: float,
+        ttl_seconds: int,
+        max_entries: int,
+    ) -> None:
+        self._db_url = db_url
+        self._collection = collection
+        self._threshold = threshold
+        self._ttl_seconds = ttl_seconds
+        self._max_entries = max_entries
+        self._ready = False
+
+        self._hits = 0
+        self._misses = 0
+        self._stores = 0
+        self._counter_lock = threading.Lock()
+
+        # --- Load embedder ---
+        self._embedder = _load_embedder("PGVectorSemanticCache")
+        if self._embedder is None:
+            return
+
+        # --- Connect to PGVector ---
+        try:
+            self._store = self._make_store()
+            self._ready = True
+            logger.info(
+                "PGVectorSemanticCache: ready (collection=%s, threshold=%.2f)",
+                self._collection,
+                self._threshold,
+            )
+        except Exception as exc:
+            logger.warning("PGVectorSemanticCache: PGVector unavailable — %s", exc)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def lookup(self, prompt: str, schema: type) -> Optional["BaseModel"]:
+        """Return a cached result or None (cache miss)."""
+        if not self._ready:
+            return None
+
+        key = f"{schema.__name__}::{prompt}"
+        try:
+            results = self._store.similarity_search_with_relevance_scores(
+                key,
+                k=1,
+                score_threshold=self._threshold,
+                filter={"schema_name": schema.__name__},
+            )
+
+            if not results:
+                with self._counter_lock:
+                    self._misses += 1
+                return None
+
+            doc, _score = results[0]
+            metadata = doc.metadata
+
+            # Client-side TTL eviction
+            if self._ttl_seconds > 0:
+                created_at = float(metadata.get("created_at", 0))
+                if (time.time() - created_at) > self._ttl_seconds:
+                    with self._counter_lock:
+                        self._misses += 1
+                    return None
+
+            result_json = metadata.get("result_json", "")
+            if not result_json:
+                with self._counter_lock:
+                    self._misses += 1
+                return None
+
+            result = schema.model_validate(json.loads(result_json))  # type: ignore[attr-defined]
+            with self._counter_lock:
+                self._hits += 1
+            return result
+
+        except Exception as exc:
+            logger.debug("PGVectorSemanticCache.lookup error: %s", exc)
+            with self._counter_lock:
+                self._misses += 1
+            return None
+
+    def store(
+        self,
+        prompt: str,
+        schema: type,
+        result: "BaseModel",
+        model_name: str = "",
+    ) -> None:
+        """Embed and upsert a result into the cache collection."""
+        if not self._ready:
+            return
+
+        key = f"{schema.__name__}::{prompt}"
+        try:
+            from langchain_core.documents import Document as LCDoc
+
+            doc = LCDoc(
+                page_content=key,
+                metadata={
+                    "schema_name": schema.__name__,
+                    "prompt_text": prompt[:500],
+                    "result_json": result.model_dump_json(),  # type: ignore[attr-defined]
+                    "model_name": model_name,
+                    "created_at": time.time(),
+                    "hit_count": 0,
+                },
+            )
+            self._store.add_documents([doc])
+            with self._counter_lock:
+                self._stores += 1
+            self._evict_if_needed()
+        except Exception as exc:
+            logger.debug("PGVectorSemanticCache.store error: %s", exc)
+
+    def stats(self) -> dict:
+        with self._counter_lock:
+            hits, misses, stores = self._hits, self._misses, self._stores
+        total = hits + misses
+        return {
+            "enabled": self._ready,
+            "hits": hits,
+            "misses": misses,
+            "stores": stores,
+            "hit_rate": round(hits / total, 3) if total > 0 else 0.0,
+            "collection": self._collection,
+            "threshold": self._threshold,
+        }
+
+    def clear(self) -> None:
+        """Delete all entries in the cache collection (used in tests and demo)."""
+        if not self._ready:
+            return
+        try:
+            self._store.delete_collection()
+            self._store = self._make_store()
+            with self._counter_lock:
+                self._hits = 0
+                self._misses = 0
+                self._stores = 0
+            logger.info("PGVectorSemanticCache: cleared collection '%s'", self._collection)
+        except Exception as exc:
+            logger.warning("PGVectorSemanticCache.clear error: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    def _make_store(self):
+        from langchain_postgres import PGVector
+        return PGVector(
+            embeddings=self._embedder,
+            collection_name=self._collection,
+            connection=self._db_url,
+            use_jsonb=True,
+        )
+
+    def _evict_if_needed(self) -> None:
+        """Delete the oldest entries when the collection exceeds max_entries."""
+        try:
+            from sqlalchemy import create_engine, text as sa_text
+
+            engine = create_engine(self._db_url)
+            with engine.connect() as conn:
+                count = conn.execute(
+                    sa_text(
+                        "SELECT COUNT(*) FROM langchain_pg_embedding lpe "
+                        "JOIN langchain_pg_collection lpc ON lpe.collection_id = lpc.uuid "
+                        "WHERE lpc.name = :name"
+                    ),
+                    {"name": self._collection},
+                ).scalar() or 0
+
+                if count <= self._max_entries:
+                    return
+
+                excess = count - self._max_entries
+                conn.execute(
+                    sa_text(
+                        "DELETE FROM langchain_pg_embedding "
+                        "WHERE id IN ("
+                        "  SELECT lpe.id FROM langchain_pg_embedding lpe "
+                        "  JOIN langchain_pg_collection lpc ON lpe.collection_id = lpc.uuid "
+                        "  WHERE lpc.name = :name "
+                        "  ORDER BY (lpe.cmetadata->>'created_at')::float ASC "
+                        "  LIMIT :excess"
+                        ")"
+                    ),
+                    {"name": self._collection, "excess": excess},
+                )
+                conn.commit()
+                logger.debug("PGVectorSemanticCache: evicted %d old entries", excess)
+        except Exception as exc:
+            logger.debug("PGVectorSemanticCache._evict_if_needed error: %s", exc)
+
+
+# ---------------------------------------------------------------------------
 # Module-level singleton (thread-safe)
 # ---------------------------------------------------------------------------
 
-_MODULE_CACHE: SemanticCache | RedisSemanticCache | _NullCache | None = None
+_MODULE_CACHE: PGVectorSemanticCache | SemanticCache | RedisSemanticCache | _NullCache | None = None
 _CACHE_LOCK = threading.Lock()
 
 
-def init_semantic_cache() -> SemanticCache | RedisSemanticCache | _NullCache:
+def init_semantic_cache() -> PGVectorSemanticCache | SemanticCache | RedisSemanticCache | _NullCache:
     """Initialise (or return) the module-level cache singleton.
 
     Reads settings from ``core.config.settings``.  If settings cannot be
@@ -614,8 +833,9 @@ def init_semantic_cache() -> SemanticCache | RedisSemanticCache | _NullCache:
     is disabled or fails to initialise.
 
     Backend selection is controlled by ``SEMANTIC_CACHE_BACKEND``:
-    - ``"qdrant"`` (default) — uses ``SemanticCache``
-    - ``"redis"``            — uses ``RedisSemanticCache``
+    - ``"pgvector"`` (default) — uses ``PGVectorSemanticCache`` (same Postgres as the app)
+    - ``"redis"``              — uses ``RedisSemanticCache``
+    - ``"qdrant"``             — uses ``SemanticCache`` (deprecated; requires qdrant-client)
     """
     global _MODULE_CACHE
     with _CACHE_LOCK:
@@ -624,7 +844,8 @@ def init_semantic_cache() -> SemanticCache | RedisSemanticCache | _NullCache:
 
         # Read settings
         enabled = True
-        backend = "qdrant"
+        backend = "pgvector"
+        db_url = ""
         qdrant_url = "http://localhost:6333"
         qdrant_api_key = ""
         collection = "nexus_semantic_cache"
@@ -638,8 +859,7 @@ def init_semantic_cache() -> SemanticCache | RedisSemanticCache | _NullCache:
             from core.config import settings  # type: ignore[import]
             enabled = settings.SEMANTIC_CACHE_ENABLED
             backend = settings.SEMANTIC_CACHE_BACKEND
-            qdrant_url = settings.QDRANT_URL
-            qdrant_api_key = settings.QDRANT_API_KEY
+            db_url = settings.DB_URL
             collection = settings.SEMANTIC_CACHE_COLLECTION
             threshold = settings.SEMANTIC_CACHE_THRESHOLD
             ttl_seconds = settings.SEMANTIC_CACHE_TTL_SECONDS
@@ -649,9 +869,8 @@ def init_semantic_cache() -> SemanticCache | RedisSemanticCache | _NullCache:
         except Exception:
             import os
             enabled = os.environ.get("SEMANTIC_CACHE_ENABLED", "true").lower() != "false"
-            backend = os.environ.get("SEMANTIC_CACHE_BACKEND", backend)
-            qdrant_url = os.environ.get("QDRANT_URL", qdrant_url)
-            qdrant_api_key = os.environ.get("QDRANT_API_KEY", "")
+            backend = os.environ.get("SEMANTIC_CACHE_BACKEND", "pgvector")
+            db_url = os.environ.get("DB_URL", "")
             redis_url = os.environ.get("REDIS_URL", redis_url)
             redis_db = int(os.environ.get("REDIS_CACHE_DB", redis_db))
 
@@ -660,8 +879,16 @@ def init_semantic_cache() -> SemanticCache | RedisSemanticCache | _NullCache:
             _MODULE_CACHE = _NullCache()
             return _MODULE_CACHE
 
-        if backend == "redis":
-            cache: SemanticCache | RedisSemanticCache = RedisSemanticCache(
+        if backend == "pgvector":
+            cache: PGVectorSemanticCache | SemanticCache | RedisSemanticCache = PGVectorSemanticCache(
+                db_url=db_url,
+                collection=collection,
+                threshold=threshold,
+                ttl_seconds=ttl_seconds,
+                max_entries=max_entries,
+            )
+        elif backend == "redis":
+            cache = RedisSemanticCache(
                 redis_url=redis_url,
                 redis_db=redis_db,
                 threshold=threshold,
@@ -669,6 +896,7 @@ def init_semantic_cache() -> SemanticCache | RedisSemanticCache | _NullCache:
                 max_entries=max_entries,
             )
         else:
+            # Legacy Qdrant fallback — degrades to NullCache if qdrant-client not installed
             cache = SemanticCache(
                 qdrant_url=qdrant_url,
                 qdrant_api_key=qdrant_api_key,
@@ -682,7 +910,7 @@ def init_semantic_cache() -> SemanticCache | RedisSemanticCache | _NullCache:
         return _MODULE_CACHE
 
 
-def get_cache() -> SemanticCache | RedisSemanticCache | _NullCache:
+def get_cache() -> PGVectorSemanticCache | SemanticCache | RedisSemanticCache | _NullCache:
     """Return the module-level cache singleton, initialising it if needed."""
     if _MODULE_CACHE is None:
         return init_semantic_cache()

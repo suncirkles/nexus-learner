@@ -9,7 +9,7 @@ Architecture:
 
 Phase 2b mocking strategy:
   - TopicAssignerAgent.assign_topic  → deterministic TopicAssignment (no LLM)
-  - _flush_qdrant_batch              → no-op (Qdrant not required)
+  - _flush_vector_batch              → no-op (vector store not required)
   - SocraticAgent.generate_flashcard → returns List[FlashcardDraft] (no DB write)
   - CriticAgent.evaluate_flashcard   → returns CriticResult (no DB write)
   - FlashcardRepo persists for real in the test DB
@@ -75,8 +75,8 @@ def mock_topic_assigner():
 
 @pytest.fixture
 def mock_qdrant():
-    """Suppress Qdrant batch flush — Qdrant not required for this test."""
-    with patch("workflows.phase1_ingestion._flush_qdrant_batch"):
+    """Suppress vector batch flush — vector store not required for this test."""
+    with patch("workflows.phase1_ingestion._flush_vector_batch"):
         yield
 
 
@@ -100,7 +100,7 @@ def _make_state(mode, doc_id, subject_id=None, file_path=None, **overrides):
         "chunks": [],
         "current_chunk_index": 0,
         "hierarchy": [],
-        "pending_qdrant_docs": [],
+        "pending_vector_docs": [],
         "current_new_cards": [],
         "generated_flashcards": [],
         "status_message": "start",

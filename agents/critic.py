@@ -1,14 +1,17 @@
 """
 agents/critic.py
 -----------------
-Grounding evaluation agent. Scores AI-generated flashcards across four
-dimensions (accuracy, logic, grounding, clarity) on a 1–4 scale each.
-Auto-rejects cards where grounding_score < 2 or clarity_score < 2.
+Responsibility: Evaluate AI-generated flashcards for accuracy, logic, grounding,
+and clarity. Returns a CriticResult with scores, feedback, and a reject flag.
+No DB writes — the calling workflow node persists via flashcard_repo.
 
-Phase 2b change: evaluate_flashcard() no longer writes to the database.
-It returns a CriticResult dataclass. The calling workflow node is
-responsible for persisting scores via flashcard_repo.update_critic_scores()
-and, when should_reject=True, updating the status via flashcard_repo.update_status().
+Do Not:
+- Rewrite, fix, or improve the question or answer text (that is SocraticAgent's job).
+- Decide which chunks to retrieve or whether a chunk is on-topic (RelevanceAgent).
+- Assign or change topic/subtopic labels on a card (TopicAssignerAgent).
+- Generate new flashcards when it rejects one; only set should_reject=True and explain why.
+- Apply leniency because AUTO_ACCEPT_CONTENT is True — that flag is checked by the
+  workflow node after the score is returned, not inside the evaluation logic itself.
 """
 
 import json
@@ -191,13 +194,21 @@ class CriticAgent:
         aggregate_score = _aggregate(acc, log, grd, cla)
         rubric_scores = {"accuracy": acc, "logic": log, "grounding": grd, "clarity": cla}
 
-        # Auto-reject rule 1: answer not traceable to source
-        # Auto-reject rule 2: phantom data reference (table/figure not embedded)
-        should_reject = grd < 2 or cla < 2
-        reject_reason = (
-            f"grounding_score={grd}/4" if grd < 2
-            else f"clarity_score={cla}/4 (phantom data reference)"
-        ) if should_reject else ""
+        # Auto-reject: any dimension scoring strictly below the configured minimum.
+        # CRITIC_REJECT_MIN_SCORE=2 (default) → reject when any score = 1 (absolute minimum).
+        # CRITIC_REJECT_MIN_SCORE=1 → never auto-reject (all cards reach Pending Review).
+        _min = settings.CRITIC_REJECT_MIN_SCORE
+        should_reject = grd < _min or cla < _min or acc < _min or log < _min
+        if grd < _min:
+            reject_reason = f"grounding_score={grd}/4"
+        elif cla < _min:
+            reject_reason = f"clarity_score={cla}/4 (phantom data reference)"
+        elif acc < _min:
+            reject_reason = f"accuracy_score={acc}/4 (factually wrong answer)"
+        elif log < _min:
+            reject_reason = f"logic_score={log}/4 (broken or circular reasoning)"
+        else:
+            reject_reason = ""
 
         if should_reject:
             if settings.AUTO_ACCEPT_CONTENT:

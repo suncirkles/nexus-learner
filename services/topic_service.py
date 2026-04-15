@@ -55,12 +55,15 @@ class TopicService:
         return self._topics.get_subtopics_with_counts(topic_id)
 
     def get_full_tree_by_subject(self, subject_id: int) -> List[dict]:
-        """Return topics with embedded subtopics (incl. card counts) — 2 queries total."""
+        """Return topics with embedded subtopics (incl. card counts) — 2 queries total.
+
+        Card counts are scoped to subject_id so each subject sees only its own cards.
+        """
         topics = self._topics.get_by_subject(subject_id)
         if not topics:
             return []
         topic_ids = [t["id"] for t in topics]
-        subtopics_by_topic = self._topics.get_subtopics_for_topic_ids(topic_ids)
+        subtopics_by_topic = self._topics.get_subtopics_for_topic_ids(topic_ids, subject_id=subject_id)
         for t in topics:
             t["subtopics"] = subtopics_by_topic.get(t["id"], [])
         return topics

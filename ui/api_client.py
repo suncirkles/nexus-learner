@@ -34,7 +34,7 @@ if _parsed.hostname and _parsed.hostname.lower() == "localhost":
         netloc=_parsed.netloc.lower().replace("localhost", "127.0.0.1")
     )
 _BASE = urlunparse(_parsed)
-_TIMEOUT = 30.0
+_TIMEOUT = 45.0   # Modal cold starts can hold a TCP connection open for 30–40 s
 
 # Module-level persistent client — connection pool is reused across all calls.
 # httpx.Client is thread-safe; Streamlit may run callbacks on multiple threads.
@@ -209,6 +209,57 @@ def delete_document(doc_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Ingestion
+# ---------------------------------------------------------------------------
+
+def spawn_ingestion(mode: str, doc_id: str, file_path: Optional[str], subject_id: Optional[int] = None, question_type: str = "active_recall", target_topics: Optional[List[str]] = None) -> dict:
+    """Trigger background document ingestion on the FastAPI backend (GENERATION mode, no file upload)."""
+    return _post("/ingestion/spawn", json={
+        "mode": mode,
+        "doc_id": doc_id,
+        "subject_id": subject_id,
+        "question_type": question_type,
+        "file_path": file_path,
+        "target_topics": target_topics or [],
+    })  # type: ignore[return-value]
+
+
+def upload_and_spawn_ingestion(
+    file_bytes: bytes,
+    filename: str,
+    subject_id: Optional[int] = None,
+    question_type: str = "active_recall",
+) -> dict:
+    """
+    Upload a file to the FastAPI container and trigger INDEXING in one request.
+
+    The FastAPI container writes the file to the Modal Volume and commits it
+    before spawning the worker, ensuring the file is visible across containers.
+    """
+    import json
+    r = _get_client().post(
+        "/ingestion/upload-and-spawn",
+        files={"file": (filename, file_bytes, "application/pdf")},
+        data={
+            "mode": "INDEXING",
+            "subject_id": str(subject_id) if subject_id is not None else "",
+            "question_type": question_type,
+            "target_topics": json.dumps([]),
+        },
+        headers=_get_headers(),
+        # Large PDFs need more time; override the default 30s timeout for upload
+        timeout=120.0,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def get_ingestion_status(job_id: str) -> dict:
+    """Poll the status (and progress) of a background ingestion job."""
+    return _get(f"/ingestion/status/{job_id}")  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
 # System
 # ---------------------------------------------------------------------------
 
@@ -303,6 +354,20 @@ def get_chunk_source(chunk_id: int) -> Optional[dict]:
         return None
     except Exception as e:
         logger.warning("get_chunk_source(%d) error: %s", chunk_id, e)
+        return None
+
+
+def get_chunk_page_image(chunk_id: int) -> Optional[dict]:
+    """Return {"image_b64": ..., "page_number": ...} or None if unavailable."""
+    try:
+        return _get(f"/flashcards/chunk-page-image/{chunk_id}")  # type: ignore[return-value]
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (404, 422):
+            return None
+        logger.warning("get_chunk_page_image(%d) failed: %s", chunk_id, e)
+        return None
+    except Exception as e:
+        logger.warning("get_chunk_page_image(%d) error: %s", chunk_id, e)
         return None
 
 

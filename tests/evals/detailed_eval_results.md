@@ -2,6 +2,7 @@
 
 ## Item 1: Active_recall
 **Bad Data:** False
+**Topic:** Fundamentals of Probability > Definitions and Terminology
 
 ### Source Text
 ```text
@@ -22,6 +23,7 @@ Evaluation scores attached below.
 
 ## Item 2: Active_recall
 **Bad Data:** False
+**Topic:** Fundamentals of Probability > Definitions and Terminology
 
 ### Source Text
 ```text
@@ -42,6 +44,7 @@ Evaluation scores attached below.
 
 ## Item 3: Active_recall
 **Bad Data:** False
+**Topic:** Fundamentals of Probability > Definitions and Terminology
 
 ### Source Text
 ```text
@@ -62,6 +65,7 @@ Evaluation scores attached below.
 
 ## Item 4: Active_recall
 **Bad Data:** False
+**Topic:** Fundamentals of Probability > Definitions and Terminology
 
 ### Source Text
 ```text
@@ -70,7 +74,7 @@ Basic probability definition.
 
 **Question:** Define probability in its most basic sense.
 
-**Answer:** Probability is a measure of the likelihood that a particular event will occur, typically expressed as a number between 0 and 1, where 0 indicates impossibility and 1 indicates certainty.
+**Answer:** Probability is a measure of the likelihood that a particular event will occur, expressed as a value between 0 and 1, where 0 indicates impossibility and 1 indicates certainty.
 
 Evaluation scores attached below.
 
@@ -82,6 +86,7 @@ Evaluation scores attached below.
 
 ## Item 5: Fill_blank
 **Bad Data:** False
+**Topic:** Fundamentals of Probability > Sample Spaces and Events
 
 ### Source Text
 ```text
@@ -102,6 +107,7 @@ Evaluation scores attached below.
 
 ## Item 6: Fill_blank
 **Bad Data:** False
+**Topic:** Fundamentals of Probability > Sample Spaces and Events
 
 ### Source Text
 ```text
@@ -122,6 +128,7 @@ Evaluation scores attached below.
 
 ## Item 7: Fill_blank
 **Bad Data:** False
+**Topic:** Fundamentals of Probability > Sample Spaces and Events
 
 ### Source Text
 ```text
@@ -142,6 +149,7 @@ Evaluation scores attached below.
 
 ## Item 8: Fill_blank
 **Bad Data:** False
+**Topic:** Fundamentals of Probability > Sample Spaces and Events
 
 ### Source Text
 ```text
@@ -162,6 +170,7 @@ Evaluation scores attached below.
 
 ## Item 9: Numerical
 **Bad Data:** False
+**Topic:** Conditional Probability and Independence > Bayes' Theorem and Conditional Logic
 
 ### Source Text
 ```text
@@ -173,35 +182,41 @@ Evaluation scores attached below.
 | University | Federal Grants (M$) | Industry Grants (M$) | Total (M$) |
 |---|---|---|---|
 | Alpha University | 180 | 60 | 240 |
-| Beta Institute | 120 | 80 | 200 |
+| Beta University | 120 | 80 | 200 |
 | Gamma University | 90 | 110 | 200 |
-| Delta College | 150 | 50 | 200 |
-| Epsilon University | 60 | 100 | 160 |
-| **Total** | **600** | **400** | **1000** |
+| Delta University | 200 | 50 | 250 |
+| Epsilon University | 60 | 50 | 110 |
+| **Total** | **650** | **350** | **1000** |
 
-A grant is selected at random from the entire pool. Given that the selected grant is from **Gamma University**, what is the probability that it is an **Industry Grant**? Additionally, using Bayes' Theorem, if you know a randomly selected grant is an **Industry Grant**, what is the probability it came from **Gamma University**?
+A grant is selected at random from the entire pool of $1,000M. Given that the selected grant is from **Delta University**, what is the probability that it is a **Federal Grant**? Additionally, if you know only that a randomly selected grant is a **Federal Grant**, what is the probability it came from **Delta University**? Use Bayes' Theorem for the second part.
 
-Use:
-- P(Industry | Gamma) = P(Industry ∩ Gamma) / P(Gamma)
-- P(Gamma | Industry) = P(Industry | Gamma) × P(Gamma) / P(Industry)
+**Answer:** Let F = event the grant is Federal, D = event the grant is from Delta University.
 
-**Answer:** **Step 1: Define base probabilities**
-- P(Gamma) = 200/1000 = 0.20
-- P(Industry) = 400/1000 = 0.40
-- P(Industry ∩ Gamma) = 110/1000 = 0.11
+**Part 1 — P(F | D): Probability the grant is Federal given it is from Delta University**
 
-**Step 2: Conditional Probability — P(Industry | Gamma)**
-P(Industry | Gamma) = P(Industry ∩ Gamma) / P(Gamma)
-= 0.11 / 0.20
-= **0.55**
+Using the conditional probability definition:
+P(F | D) = P(F ∩ D) / P(D)
 
-**Step 3: Bayes' Theorem — P(Gamma | Industry)**
-P(Gamma | Industry) = [P(Industry | Gamma) × P(Gamma)] / P(Industry)
-= [0.55 × 0.20] / 0.40
-= 0.11 / 0.40
-= **0.275**
+P(F ∩ D) = 200 / 1000 = 0.200
+P(D) = 250 / 1000 = 0.250
 
-So, given a grant is from Gamma University, there is a 55% chance it is an Industry Grant. Conversely, given a grant is an Industry Grant, there is a 27.5% chance it originated from Gamma University.
+P(F | D) = 0.200 / 0.250 = **0.80 (80%)**
+
+---
+
+**Part 2 — P(D | F): Probability the grant is from Delta given it is Federal (Bayes' Theorem)**
+
+Bayes' Theorem: P(D | F) = P(F | D) × P(D) / P(F)
+
+P(F) = 650 / 1000 = 0.650
+P(D) = 250 / 1000 = 0.250
+P(F | D) = 0.80 (from Part 1)
+
+P(D | F) = (0.80 × 0.250) / 0.650
+P(D | F) = 0.200 / 0.650
+P(D | F) ≈ **0.3077 (≈ 30.77%)**
+
+Alternatively, directly: P(D | F) = 200/650 ≈ 0.3077 ✓
 
 Evaluation scores attached below.
 
@@ -213,119 +228,71 @@ Evaluation scores attached below.
 
 ## Item 10: Numerical
 **Bad Data:** False
+**Topic:** Conditional Probability and Independence > Bayes' Theorem and Conditional Logic
 
 ### Source Text
 ```text
 P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2
 ```
 
-**Question:** A cybersecurity analyst monitors two types of network events: **suspicious logins (S)** and **data breaches (D)**. The following information is known:
+**Question:** A cybersecurity analyst monitors two types of network events: suspicious logins (event S) and data packet anomalies (event D). From historical logs, the following probabilities are known:
 
-| Parameter | Value |
+| Given Information | Value |
 |---|---|
 | P(D) | 0.40 |
 | P(S \| D) | 0.35 |
-| P(S) | 0.25 |
 
-Using the definition of conditional probability — **P(A|B) = P(A AND B) / P(B)** — calculate **P(D | S)**, the probability that a data breach occurred *given* that a suspicious login was detected.
+Using the definition of conditional probability, calculate P(S AND D).
 
-**Answer:** **Step 1 — Find P(S AND D) using the given conditional probability:**
+**Answer:** Using the conditional probability formula:
 
-From the formula: P(S | D) = P(S AND D) / P(D)
+P(S | D) = P(S AND D) / P(D)
 
-Rearranging: P(S AND D) = P(S | D) × P(D)
+Rearranging to solve for the joint probability:
 
-P(S AND D) = 0.35 × 0.40 = **0.14**
+P(S AND D) = P(S | D) × P(D)
+P(S AND D) = 0.35 × 0.40
+P(S AND D) = 0.14
 
----
-
-**Step 2 — Apply the conditional probability formula to find P(D | S):**
-
-P(D | S) = P(S AND D) / P(S)
-
-P(D | S) = 0.14 / 0.25 = **0.56**
-
----
-
-**Conclusion:** There is a **56% probability** that a data breach occurred, given that a suspicious login was detected.
+There is a 14% probability that both a suspicious login and a data packet anomaly occur simultaneously.
 
 Evaluation scores attached below.
 
 ### Scores
 - Code Graders: {'has_flashcards': True, 'valid_count': True, 'correct_type': True, 'valid_rubric': True}
-- Basic LLM Judge: {'is_grounded': False, 'is_self_contained': False}
-- Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 3, 'clarity': 4, 'should_reject': False}
+- Basic LLM Judge: {'is_grounded': True, 'is_self_contained': False}
+- Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 4, 'clarity': 4, 'should_reject': False}
 ---
 
 ## Item 11: Numerical
 **Bad Data:** False
+**Topic:** Conditional Probability and Independence > Bayes' Theorem and Conditional Logic
 
 ### Source Text
 ```text
 P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2
 ```
 
-**Question:** A cybersecurity analyst is monitoring two independent threat events on a network. Event **D** represents a data breach, and Event **F** represents a firewall alert. The following probabilities are known:
+**Question:** A cybersecurity analyst monitors two types of network events: suspicious logins (event S) and firewall alerts (event F). From historical logs, the following is known:
 
 | Parameter | Value |
-|-----------|-------|
+|---|---|
 | P(F) | 0.40 |
-| P(D ∩ F) | 0.14 |
+| P(S \| F) | 0.35 |
 
-Using the definition of conditional probability:
-$$P(D|F) = \frac{P(D \cap F)}{P(F)}$$
-
-Calculate **P(D | F)**, the probability that a data breach occurred **given** that a firewall alert was triggered.
+Using the definition of conditional probability, calculate P(S AND F).
 
 **Answer:** Using the conditional probability formula:
 
-$$P(D|F) = \frac{P(D \cap F)}{P(F)} = \frac{0.14}{0.40} = 0.35$$
+P(S | F) = P(S AND F) / P(F)
 
-There is a **35% probability** that a data breach occurred, given that a firewall alert was triggered.
+Rearranging to solve for the joint probability:
 
-Evaluation scores attached below.
+P(S AND F) = P(S | F) × P(F)
 
-### Scores
-- Code Graders: {'has_flashcards': True, 'valid_count': True, 'correct_type': True, 'valid_rubric': True}
-- Basic LLM Judge: {'is_grounded': False, 'is_self_contained': False}
-- Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 3, 'clarity': 4, 'should_reject': False}
----
+P(S AND F) = 0.35 × 0.40 = **0.14**
 
-## Item 12: Numerical
-**Bad Data:** False
-
-### Source Text
-```text
-P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2
-```
-
-**Question:** A cybersecurity analyst is monitoring two independent events on a network:
-
-- **Event X**: A firewall alert is triggered.
-- **Event Y**: A malware scan detects a threat.
-
-The following probabilities are known:
-
-| Parameter | Value |
-|-----------|-------|
-| P(Y) | 0.4 |
-| P(X \| Y) | 0.35 |
-
-Using the definition of conditional probability, calculate **P(X AND Y)**.
-
-**Answer:** Using the conditional probability formula:
-
-P(X | Y) = P(X AND Y) / P(Y)
-
-Rearranging to solve for P(X AND Y):
-
-P(X AND Y) = P(X | Y) × P(Y)
-
-P(X AND Y) = 0.35 × 0.4
-
-**P(X AND Y) = 0.14**
-
-This means there is a 14% probability that both a firewall alert is triggered and a malware threat is detected simultaneously.
+There is a 14% probability that a network event is both a suspicious login and a firewall alert.
 
 Evaluation scores attached below.
 
@@ -335,17 +302,79 @@ Evaluation scores attached below.
 - Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 3, 'clarity': 4, 'should_reject': False}
 ---
 
+## Item 12: Numerical
+**Bad Data:** False
+**Topic:** Conditional Probability and Independence > Bayes' Theorem and Conditional Logic
+
+### Source Text
+```text
+P(A|B) = P(A AND B) / P(B). Find P(A) if P(B)=0.5 and P(A|B)=0.2
+```
+
+**Question:** A factory produces widgets on two shifts. The probability that a randomly selected widget is from the **night shift** is 0.35. A quality inspector finds that the probability a widget is **defective given it came from the night shift** is 0.12. Using the definition of conditional probability:
+
+$$P(A|B) = \frac{P(A \cap B)}{P(B)}$$
+
+Calculate the probability that a randomly selected widget is **both from the night shift AND defective**, i.e., P(Defective ∩ Night Shift).
+
+**Answer:** Using the conditional probability formula rearranged:
+
+P(A ∩ B) = P(A|B) × P(B)
+
+Where:
+- P(B) = P(Night Shift) = 0.35
+- P(A|B) = P(Defective | Night Shift) = 0.12
+
+P(Defective ∩ Night Shift) = 0.12 × 0.35 = **0.042**
+
+So there is a 4.2% chance that a randomly selected widget is both from the night shift and defective.
+
+Evaluation scores attached below.
+
+### Scores
+- Code Graders: {'has_flashcards': True, 'valid_count': True, 'correct_type': True, 'valid_rubric': True}
+- Basic LLM Judge: {'is_grounded': True, 'is_self_contained': True}
+- Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 3, 'clarity': 4, 'should_reject': False}
+---
+
 ## Item 13: Scenario
 **Bad Data:** False
+**Topic:** Applied Probability Models > Independent Trials and Games
 
 ### Source Text
 ```text
 Consider a coin tossing game.
 ```
 
-**Question:** A player tosses a fair coin repeatedly. What happens if the player decides to stop the game the moment they get their first Head — specifically, what is the probability that the first Head appears on the 3rd toss (i.e., the sequence is Tail, Tail, Head)?
+**Question:** You are playing a coin-tossing game where a fair coin is tossed repeatedly in independent trials. On any given toss, the probability of Heads is 0.5 and the probability of Tails is 0.5. If you win only when you get Heads on two consecutive tosses, what happens to the probability of winning on exactly the 2nd and 3rd tosses (i.e., the first Head appears on toss 2 and the second Head appears on toss 3) compared to winning on exactly the 1st and 2nd tosses? Explain using the concept of independent trials.
 
-**Answer:** In a sequence of independent fair coin tosses, the probability that the first Head appears on the 3rd toss is calculated as: P(T) × P(T) × P(H) = (1/2) × (1/2) × (1/2) = 1/8. This follows from the independence of each toss and the geometric distribution of the waiting time for the first success.
+**Answer:** Because the tosses are independent, the outcome of any toss does not affect any other toss. 
+
+- Probability of Heads on toss 1 AND Heads on toss 2 = 0.5 × 0.5 = 0.25.
+- Probability of Tails on toss 1, Heads on toss 2, AND Heads on toss 3 = 0.5 × 0.5 × 0.5 = 0.125.
+
+The probability of winning on tosses 2 & 3 (0.125) is lower than winning on tosses 1 & 2 (0.25), because an extra independent toss (Tails on toss 1) must also occur, multiplying in an additional factor of 0.5. Independence means each toss contributes its own probability multiplicatively, so adding more required outcomes always reduces the joint probability.
+
+Evaluation scores attached below.
+
+### Scores
+- Code Graders: {'has_flashcards': True, 'valid_count': True, 'correct_type': True, 'valid_rubric': True}
+- Basic LLM Judge: {'is_grounded': False, 'is_self_contained': True}
+- Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 3, 'clarity': 3, 'should_reject': False}
+---
+
+## Item 14: Scenario
+**Bad Data:** False
+**Topic:** Applied Probability Models > Independent Trials and Games
+
+### Source Text
+```text
+Consider a coin tossing game.
+```
+
+**Question:** In a coin tossing game, you toss a fair coin repeatedly. Each toss is independent of all previous tosses. What happens to the probability of getting Heads on the 5th toss if the first 4 tosses all landed on Tails?
+
+**Answer:** The probability of getting Heads on the 5th toss remains exactly 1/2. Because each toss is an independent trial, the outcome of any previous toss has absolutely no influence on the outcome of the next toss. The streak of 4 Tails does not make Heads 'due' — this misconception is known as the Gambler's Fallacy. For independent trials, P(Heads on toss n) = 1/2 regardless of prior history.
 
 Evaluation scores attached below.
 
@@ -355,37 +384,18 @@ Evaluation scores attached below.
 - Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 3, 'clarity': 4, 'should_reject': False}
 ---
 
-## Item 14: Scenario
-**Bad Data:** False
-
-### Source Text
-```text
-Consider a coin tossing game.
-```
-
-**Question:** In a coin tossing game, you toss a fair coin repeatedly. What happens if you define each toss as an independent trial — that is, the outcome of one toss has no effect on the next? If the probability of getting Heads on any single toss is 0.5, what is the probability of getting Heads on ALL of 3 consecutive tosses?
-
-**Answer:** Because each toss is an independent trial, the probability of getting Heads on all 3 consecutive tosses is calculated by multiplying the individual probabilities together: P(HHH) = 0.5 × 0.5 × 0.5 = 0.125 (or 1/8). The independence assumption means past outcomes do not influence future ones, so the multiplication rule for independent events applies directly.
-
-Evaluation scores attached below.
-
-### Scores
-- Code Graders: {'has_flashcards': True, 'valid_count': True, 'correct_type': True, 'valid_rubric': True}
-- Basic LLM Judge: {'is_grounded': False, 'is_self_contained': True}
-- Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 2, 'clarity': 4, 'should_reject': False}
----
-
 ## Item 15: Scenario
 **Bad Data:** False
+**Topic:** Applied Probability Models > Independent Trials and Games
 
 ### Source Text
 ```text
 Consider a coin tossing game.
 ```
 
-**Question:** A player tosses a fair coin repeatedly. What happens if the player decides to stop the game the moment they get their first Head? Specifically, what is the probability that the first Head appears on the 3rd toss (i.e., the sequence is Tail, Tail, Head)?
+**Question:** You are playing a coin tossing game where you flip a fair coin repeatedly. On each flip, the outcome (Heads or Tails) is independent of all previous flips. After flipping Heads 5 times in a row, a fellow player argues that Tails is now 'due' and is more likely on the next flip. What would you tell them, and what is the actual probability of Tails on the next flip?
 
-**Answer:** In a coin tossing game with independent trials, each toss is independent and the probability of a Head (H) or Tail (T) on any single toss is 1/2. For the first Head to appear on the 3rd toss, the sequence must be T, T, H. Since the tosses are independent, the probability is: P(T) × P(T) × P(H) = (1/2) × (1/2) × (1/2) = 1/8.
+**Answer:** The fellow player is committing the Gambler's Fallacy. Because each coin toss is an independent trial, the outcome of any single flip has no influence on future flips. The probability of Tails on the next flip remains exactly 1/2 (50%), regardless of the previous 5 Heads outcomes. Independence means past results carry no information about the next result.
 
 Evaluation scores attached below.
 
@@ -397,26 +407,28 @@ Evaluation scores attached below.
 
 ## Item 16: Scenario
 **Bad Data:** False
+**Topic:** Applied Probability Models > Independent Trials and Games
 
 ### Source Text
 ```text
 Consider a coin tossing game.
 ```
 
-**Question:** You are playing a coin tossing game where a fair coin is tossed repeatedly in independent trials. Each toss results in either Heads (H) or Tails (T), each with probability 0.5. What happens to the outcome of any single toss if the previous toss landed Heads — does it become more likely to land Tails to 'balance out'?
+**Question:** In a coin tossing game, you toss a fair coin repeatedly. What happens if you define each toss as an independent trial — does the outcome of the 5th toss change if the first 4 tosses all landed Heads? Explain what the independence assumption means in this context.
 
-**Answer:** No. Because the coin tosses are independent trials, the outcome of any single toss is not affected by the results of previous tosses. The probability of Tails on any given toss remains exactly 0.5, regardless of what happened before. The notion that a Tails is 'due' after a run of Heads is a common misconception known as the Gambler's Fallacy; independence means past outcomes carry no information about future ones.
+**Answer:** No, the outcome of the 5th toss does not change based on previous results. Because each toss is defined as an independent trial, the probability of Heads (or Tails) on any single toss remains 1/2, regardless of what happened on prior tosses. Independence means that the outcome of one trial has absolutely no influence on the outcome of any other trial. This is a foundational property of independent trials in probability models — past results carry no predictive power over future results in such a game.
 
 Evaluation scores attached below.
 
 ### Scores
 - Code Graders: {'has_flashcards': True, 'valid_count': True, 'correct_type': True, 'valid_rubric': True}
 - Basic LLM Judge: {'is_grounded': False, 'is_self_contained': True}
-- Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 3, 'clarity': 4, 'should_reject': False}
+- Critic Agent: {'aggregate': 4, 'accuracy': 4, 'logic': 4, 'grounding': 2, 'clarity': 4, 'should_reject': False}
 ---
 
 ## Item 17: Active_recall
 **Bad Data:** True
+**Topic:** Unknown Document > Unclassified Data
 
 ### Source Text
 ```text
@@ -434,6 +446,7 @@ x % $ & * ( ) )
 
 ## Item 18: Active_recall
 **Bad Data:** True
+**Topic:** Unknown Document > Unclassified Data
 
 ### Source Text
 ```text
@@ -449,6 +462,7 @@ The
 
 ## Item 19: Active_recall
 **Bad Data:** True
+**Topic:** Unknown Document > Unclassified Data
 
 ### Source Text
 ```text
@@ -464,6 +478,7 @@ This page intentionally left blank.
 
 ## Item 20: Active_recall
 **Bad Data:** True
+**Topic:** Unknown Document > Unclassified Data
 
 ### Source Text
 ```text

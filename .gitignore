@@ -43,3 +43,4 @@ Thumbs.db
 
 # Gemini agent artifacts
 .gemini/
+.env.test

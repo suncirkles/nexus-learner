@@ -14,6 +14,7 @@ import streamlit as st
 from ui import api_client
 from ui.components.topic_input import render_topic_input_section
 from ui.components.background_monitor import render_study_materials_background_monitor
+from ui.pages.library import _render_api_job_monitor
 
 logger = logging.getLogger(__name__)
 
@@ -108,27 +109,40 @@ def _render_upload_tab(subject_id: int, subject_name: str):
             elif not attached_docs:
                 st.warning("No documents attached to this subject.")
             else:
-                from core.background import start_background_task
+                spawned = 0
+                errors = []
                 for doc in attached_docs:
-                    gen_id = str(uuid.uuid4())
-                    state = {
-                        "mode": "GENERATION",
-                        "doc_id": doc["id"],
-                        "subject_id": subject_id,
-                        "target_topics": final_target_topics,
-                        "question_type": selected_question_type,
-                        "chunks": [],
-                        "current_chunk_index": 0,
-                        "generated_flashcards": [],
-                        "status_message": "Matching topics and identifying chunks...",
-                    }
-                    label = doc.get("title") or doc.get("filename")
-                    start_background_task(
-                        state, gen_id,
-                        filename=f"Gen ({label}): {', '.join(final_target_topics[:2])}...",
-                    )
-                st.toast(f"Flashcard generation started for {len(attached_docs)} document(s).")
-                st.rerun()
+                    doc_id = doc["id"]
+                    label = doc.get("title") or doc.get("filename") or doc_id[:8]
+                    try:
+                        response = api_client.spawn_ingestion(
+                            mode="GENERATION",
+                            doc_id=doc_id,
+                            file_path=None,
+                            subject_id=subject_id,
+                            question_type=selected_question_type,
+                            target_topics=final_target_topics,
+                        )
+                        returned_job_id = response.get("job_id")
+                        job_status = response.get("status", "")
+                        if job_status == "failed":
+                            errors.append(f"'{label}': {response.get('error', 'Unknown error')}")
+                        elif returned_job_id:
+                            if "active_modal_jobs" not in st.session_state:
+                                st.session_state.active_modal_jobs = {}
+                            st.session_state.active_modal_jobs[returned_job_id] = {
+                                "filename": f"Gen ({label}): {', '.join(final_target_topics[:2])}{'...' if len(final_target_topics) > 2 else ''}",
+                                "mode": "GENERATION",
+                            }
+                            spawned += 1
+                    except Exception as e:
+                        errors.append(f"'{label}': {e}")
+
+                for err in errors:
+                    st.error(f"Failed to queue generation for {err}")
+                if spawned:
+                    st.toast(f"Flashcard generation queued for {spawned} document(s).")
+                    st.rerun()
 
 
 def _render_web_research_tab(subject_id: int, subject_name: str):
@@ -291,6 +305,10 @@ def _run_web_research(subject_id: int, subject_name: str, topics: list):
     if bg_topics:
         from core.background import start_web_background_task
         task_id = f"web_{subject_id}_{_uuid.uuid4().hex[:8]}"
+        # NOTE: Web research background tasks still run as daemon threads in the Streamlit
+        # container (max_containers=1 keeps them alive). Progress IS visible via the
+        # in-memory background_monitor because the thread runs in the same process.
+        # A future /ingestion/spawn-web endpoint would allow routing to a Modal worker.
         start_web_background_task(bg_topics, subject_id, subject_name, task_id)
         st.toast(
             f"Initial {len(sync_topics)} topic(s) ready! "
@@ -373,4 +391,6 @@ def render_study_materials():
     else:
         st.warning("Please select or create a subject above before uploading artifacts.")
 
+    # DB-polling monitor for API-spawned jobs (Modal); in-memory monitor for local dev threads
+    _render_api_job_monitor()
     render_study_materials_background_monitor()

@@ -6,7 +6,7 @@ Services and agents depend on these protocols — never on concrete implementati
 This enables unit testing with mock repos and future storage-backend swaps.
 """
 
-from typing import List, Optional, Protocol, runtime_checkable
+from typing import List, Optional, Protocol, runtime_checkable, Any
 
 
 @runtime_checkable
@@ -82,13 +82,22 @@ class FlashcardRepoProtocol(Protocol):
 
 @runtime_checkable
 class VectorStoreProtocol(Protocol):
+    @property
+    def collection_name(self) -> str: ...
+    
+    @property
+    def embeddings(self) -> Any: ...
+
     def upsert_chunks(self, chunks: List[dict]) -> None: ...
     """chunks: list of {"text": str, "metadata": dict}"""
+    
     def delete_by_document(self, document_id: str) -> None: ...
+    
     def search(
         self,
         query: str,
         top_k: int = 10,
         filter_doc_id: Optional[str] = None,
     ) -> List[dict]: ...
+    
     def drop_collection(self) -> None: ...

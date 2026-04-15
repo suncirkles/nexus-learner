@@ -61,6 +61,113 @@ def get_chunk_source(
     return result
 
 
+@router.get("/chunk-page-image/{chunk_id}")
+def get_chunk_page_image(
+    chunk_id: int, svc: FlashcardService = Depends(get_flashcard_service)
+):
+    """Render the PDF page that a chunk came from and return it as a base64-encoded PNG.
+
+    Returns {"image_b64": "<base64>", "page_number": <int>} on success,
+    or 404 if the chunk/document is not found, or 422 if the file is unavailable.
+    """
+    import os, base64
+    import fitz  # PyMuPDF
+    from core.config import settings
+
+    src = svc.get_chunk_source(chunk_id)
+    if src is None:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+
+    page_number = src.get("page_number")
+    doc_id = src.get("document_id")
+    filename = src.get("filename")
+    source_type = src.get("source_type", "pdf")
+
+    if source_type != "pdf" or not doc_id or not filename:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No renderable PDF page: source_type={source_type!r} doc_id={doc_id!r} filename={filename!r} page_number={page_number!r}",
+        )
+
+    # Chunks indexed before page_number tracking was added will have page_number=None.
+    # Default to page 0 so they at least show the document cover page.
+    if page_number is None:
+        page_number = 0
+
+    # 1. Check the pre-generated page cache first (written by the indexing worker).
+    #    On Modal this resolves to /data/page_cache — a persistent volume shared by
+    #    all containers. Locally it resolves to ./page_cache.
+    cached_path = os.path.join(settings.abs_page_cache_dir, f"{doc_id}_p{page_number:04d}.png")
+    if os.path.exists(cached_path):
+        with open(cached_path, "rb") as _f:
+            png_bytes = _f.read()
+        return {
+            "image_b64": base64.b64encode(png_bytes).decode(),
+            "page_number": page_number,
+        }
+
+    # 2. On Modal, this container may not have seen writes committed by other
+    #    containers (the indexing worker writes PNGs; the upload container writes
+    #    the PDF).  Call vol.reload() once to pull the latest volume state, then
+    #    re-check the cache before falling through to on-demand rendering.
+    if os.environ.get("MODAL_RUN") == "true":
+        try:
+            import modal as _modal
+            _modal.Volume.from_name("nexus-learner-data").reload()
+        except Exception as _ve:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("vol.reload() failed (non-fatal): %s", _ve)
+        # Re-check cache after reload — worker may have committed PNGs since startup
+        if os.path.exists(cached_path):
+            with open(cached_path, "rb") as _f:
+                png_bytes = _f.read()
+            return {
+                "image_b64": base64.b64encode(png_bytes).decode(),
+                "page_number": page_number,
+            }
+
+    # 3. Cache miss — render on-demand from the original PDF.
+    #    File is stored as {doc_id}_{sanitized_filename}; scan to avoid
+    #    having to replicate the exact sanitisation logic.
+    upload_dir = settings.abs_upload_dir
+    file_path = None
+    prefix = f"{doc_id}_"
+    try:
+        for entry in os.scandir(upload_dir):
+            if entry.name.startswith(prefix):
+                file_path = entry.path
+                break
+    except FileNotFoundError:
+        pass
+
+    if not file_path:
+        raise HTTPException(status_code=422, detail="PDF file not available on server")
+
+    try:
+        doc = fitz.open(file_path)
+        if page_number >= len(doc):
+            raise HTTPException(status_code=422, detail="Page number out of range")
+        page = doc[page_number]
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+        png_bytes = pix.tobytes("png")
+        doc.close()
+        # Save to cache so subsequent requests are fast.
+        try:
+            with open(cached_path, "wb") as _f:
+                _f.write(png_bytes)
+        except Exception:
+            pass  # Cache write failure is non-fatal
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to render page: {exc}") from exc
+
+    return {
+        "image_b64": base64.b64encode(png_bytes).decode(),
+        "page_number": page_number,
+    }
+
+
 @router.post("/chunk-sources", response_model=ChunkSourceBatchResponse)
 def get_chunk_sources_batch(
     body: ChunkSourceBatchRequest,

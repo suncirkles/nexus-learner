@@ -9,7 +9,7 @@ agents/socratic.py, agents/critic.py, and app.py.
 import json
 import logging
 from typing import Dict, List, Optional
-from core.database import SessionLocal, Flashcard
+from core.database import SessionLocal, Flashcard, SubjectTopicAssociation, Subtopic
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +47,31 @@ class FlashcardRepo:
         question_type: str,
         rubric_json: str,
         status: str = "pending",
+        topic_id: Optional[int] = None,
     ) -> dict:
         with SessionLocal() as db:
+            # Validate subject→topic→subtopic chain before inserting.
+            if topic_id and subject_id:
+                assoc = db.query(SubjectTopicAssociation).filter_by(
+                    subject_id=subject_id, topic_id=topic_id
+                ).first()
+                if not assoc:
+                    logger.error(
+                        "CHAIN VIOLATION: subject_id=%s topic_id=%s not in SubjectTopicAssociation — "
+                        "flashcard will still be saved but subject→topic link is missing",
+                        subject_id, topic_id,
+                    )
+            if subtopic_id and topic_id:
+                sub = db.query(Subtopic).filter_by(id=subtopic_id).first()
+                if sub and sub.topic_id != topic_id:
+                    logger.error(
+                        "CHAIN VIOLATION: subtopic_id=%s belongs to topic_id=%s, not topic_id=%s",
+                        subtopic_id, sub.topic_id, topic_id,
+                    )
+
             fc = Flashcard(
                 subject_id=subject_id,
+                topic_id=topic_id,
                 subtopic_id=subtopic_id,
                 chunk_id=chunk_id,
                 question=question,

@@ -1,12 +1,17 @@
 """
 agents/web_researcher.py
 -------------------------
-Web content research agent. Uses a multi-source strategy for reliability:
+Responsibility: Search the web for content relevant to a study query, scrape and
+deduplicate pages, and return clean text chunks ready for the ingestion pipeline.
+Multi-source strategy: Wikipedia REST API → DuckDuckGo → parallel scraping.
 
-  1. Wikipedia REST API  — primary, free, no key, plain-text content via API
-  2. ddgs (DuckDuckGo)  — broad search filtered to trusted domains
-  3. Parallel scraping  — 4 concurrent workers for non-Wikipedia pages
-  4. Inherently-safe tier — skips LLM safety check for official docs
+Do Not:
+- Parse local files or PDFs (IngestionAgent's job).
+- Classify, embed, or assign topics to the content it retrieves (downstream agents).
+- Generate flashcards or evaluate content quality (SocraticAgent / CriticAgent).
+- Curate or restructure topic hierarchies (CuratorAgent).
+- Make educational judgements about the content; return raw text and let the
+  ingestion pipeline decide what to keep.
 """
 
 import hashlib

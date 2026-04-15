@@ -72,11 +72,71 @@ def _sidebar_monitor():
                 bt.pop(tid, None)
 
 
+@st.fragment(run_every=5)
+def _sidebar_modal_monitor():
+    """Polls /ingestion/status for active Modal jobs stored in session state."""
+    from ui import api_client
+
+    jobs: dict = st.session_state.get("active_modal_jobs", {})
+    if not jobs:
+        return
+
+    st.divider()
+    st.subheader("⏳ Background Processes")
+    finished = []
+
+    for job_id, meta in list(jobs.items()):
+        try:
+            s = api_client.get_ingestion_status(job_id)
+        except Exception:
+            continue
+
+        status = s.get("status", "unknown")
+        api_filename = s.get("filename", "")
+        filename = (
+            meta.get("filename")
+            if (not api_filename or api_filename == "Unknown")
+            else api_filename
+        ) or job_id[:8]
+        mode = meta.get("mode", "INDEXING")
+
+        if status in ("queued", "indexing", "generating", "generation"):
+            if mode == "GENERATION":
+                cc = s.get("current_chunk_index", 0)
+                tc = s.get("total_chunks", 0)
+                pct = min(max(cc / tc if tc > 0 else 0, 0.0), 1.0)
+                st.markdown(f"**🧠 Generating:** {filename}")
+                st.progress(pct, text=f"Chunk {cc}/{tc} · {s.get('status_message', 'Processing...')}")
+            else:
+                tp = s.get("total_pages", 1) or 1
+                cp = s.get("current_page", 0)
+                pct = min(max(cp / tp, 0.0), 1.0)
+                st.markdown(f"**⏳ Indexing:** {filename}")
+                st.progress(pct, text=f"Page {cp}/{tp} · {s.get('status_message', 'Processing...')}")
+            if st.button("✖ Dismiss", key=f"sb_dismiss_{job_id}"):
+                finished.append(job_id)
+
+        elif status == "completed":
+            fc = s.get("flashcards_count", 0)
+            label = f"✅ **Done**: {filename}" + (f" — {fc} card(s)" if fc else "")
+            st.success(label)
+            if st.button("✖ Clear", key=f"sb_clear_{job_id}"):
+                finished.append(job_id)
+
+        elif status == "failed":
+            st.error(f"❌ **Failed**: {filename}")
+            if st.button("✖ Clear", key=f"sb_clr_fail_{job_id}"):
+                finished.append(job_id)
+
+    for job_id in finished:
+        st.session_state.active_modal_jobs.pop(job_id, None)
+
+
 def render_sidebar_background_monitor():
     """Sidebar fragment showing active background tasks.
 
-    The run_every fragment is only mounted when there are active/failed tasks.
-    When idle this renders nothing — no fragment, no WebSocket polling, no errors.
+    Shows in-process (thread-based, local dev) and Modal API jobs.
+    Only mounts fragments when there is actually work to display.
     """
     from core.background import background_tasks, _lock as _bg_lock
     with _bg_lock:
@@ -85,6 +145,10 @@ def render_sidebar_background_monitor():
     logger.debug("[GATE:sidebar] has_active=%s tasks=%s", has_active, snapshot)
     if has_active:
         _sidebar_monitor()
+
+    # Modal / API-tracked jobs live in session state, not in-memory dict
+    if st.session_state.get("active_modal_jobs"):
+        _sidebar_modal_monitor()
 
 
 @st.fragment(run_every=5)

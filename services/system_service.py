@@ -16,18 +16,24 @@ class SystemService:
         self._vector = vector_store
 
     def reset(self) -> None:
-        """Wipe all SQLite tables and the Qdrant collection.
+        """Wipe all relational tables and the vector store index.
 
-        SQLite: drop_all + create_all via SQLAlchemy metadata (no Alembic yet).
-        Qdrant: drop_collection via VectorStoreProtocol so no direct client here.
+        Database: drop_all + create_all via SQLAlchemy metadata.
+        VectorStore: drop_collection via VectorStoreProtocol (best-effort).
+
+        Vector store errors are logged but never re-raised — a stale vector
+        index is recoverable, but raising here would leave the DB wiped with
+        no tables and no way to recover without a manual schema re-init.
         """
         from core.database import Base, engine
         Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
-        logger.info("SQLite tables recreated.")
+        logger.info("Relational database tables recreated.")
 
         try:
             self._vector.drop_collection()
+            logger.info("Vector store collection dropped.")
         except Exception as e:
-            logger.warning("Qdrant drop_collection failed during reset: %s", e)
-            raise
+            logger.warning(
+                "Vector store drop_collection failed during reset (non-fatal): %s", e
+            )

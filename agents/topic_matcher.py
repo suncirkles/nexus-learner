@@ -1,8 +1,16 @@
 """
 agents/topic_matcher.py
 -------------------------
-Agent for semantic similarity matching between user-provided topics 
-and a document's pre-indexed subtopics.
+Responsibility: Semantically match user-provided study topic strings against
+the pre-indexed subtopics for a subject and return the best-matching subtopic IDs.
+
+Do Not:
+- Create, rename, or restructure topics (CuratorAgent / TopicAssignerAgent).
+- Score the relevance of individual content chunks (RelevanceAgent's job).
+- Generate flashcards or evaluate card quality (SocraticAgent / CriticAgent).
+- Fetch or embed any document content (IngestionAgent).
+- Reject a user topic outright; always return the closest match even if approximate,
+  and let the RelevanceAgent filter weak results downstream.
 """
 
 import logging

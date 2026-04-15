@@ -1,7 +1,17 @@
 """
 agents/relevance.py
 -------------------
-Agent for determining the relevance of content chunks to specific topics.
+Responsibility: Decide whether an individual content chunk is relevant to a given
+set of target topics. Conservative by design — marks uncertain chunks as relevant
+to avoid false negatives that would silently drop study material.
+
+Do Not:
+- Match or discover topic names (TopicMatcherAgent's job).
+- Generate flashcards from the chunks it evaluates (SocraticAgent).
+- Score flashcard quality (CriticAgent).
+- Modify, summarise, or rewrite chunk content; only return a relevance verdict.
+- Apply strict filtering; when uncertain, pass the chunk through — it is cheaper
+  to generate a bad card and have CriticAgent reject it than to lose good material.
 """
 
 import logging

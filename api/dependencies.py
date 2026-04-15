@@ -7,13 +7,15 @@ repo implementations. No DI framework — plain Python constructor injection.
 
 from functools import lru_cache
 from fastapi import Depends
+from sqlalchemy.orm import Session
 
 from repositories.sql.subject_repo import SubjectRepo
 from repositories.sql.flashcard_repo import FlashcardRepo
 from repositories.sql.topic_repo import TopicRepo
 from repositories.sql.document_repo import DocumentRepo
 from repositories.sql.chunk_repo import ChunkRepo
-from repositories.vector.qdrant_store import QdrantStore
+from repositories.protocols import VectorStoreProtocol
+from repositories.vector.factory import get_vector_store as get_vector_store_factory
 
 from services.subject_service import SubjectService
 from services.flashcard_service import FlashcardService
@@ -21,10 +23,17 @@ from services.topic_service import TopicService
 from services.library_service import LibraryService
 from services.system_service import SystemService
 
+from core.database import get_db as core_get_db
+
 
 # ---------------------------------------------------------------------------
 # Singleton repo/store instances (cheap to share across requests)
 # ---------------------------------------------------------------------------
+
+def get_db():
+    """Returns a database session. Re-exported from core.database."""
+    yield from core_get_db()
+
 
 def get_subject_repo() -> SubjectRepo:
     return SubjectRepo()
@@ -47,9 +56,9 @@ def get_chunk_repo() -> ChunkRepo:
 
 
 @lru_cache(maxsize=1)
-def get_vector_store() -> QdrantStore:
-    """Shared QdrantStore — embeddings are loaded once."""
-    return QdrantStore()
+def get_vector_store() -> VectorStoreProtocol:
+    """Shared VectorStore — provider is selected based on settings."""
+    return get_vector_store_factory()
 
 
 # ---------------------------------------------------------------------------

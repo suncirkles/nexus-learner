@@ -1,20 +1,22 @@
 """
 agents/socratic.py
 -------------------
-AI-powered flashcard generator supporting multiple question types.
-Generates high-quality Q&A pairs from text chunks and returns FlashcardDraft
-objects — no DB writes.
+Responsibility: Generate Active Recall Q&A flashcard drafts from a source text chunk.
+Returns FlashcardDraft objects — no DB writes (except recreate/suggest, which are
+UI-driven and will be decoupled in Phase 3).
 
-Phase 2b change: generate_flashcard() no longer writes to the database.
-It returns a list of FlashcardDraft dataclasses. The calling workflow node
-persists them via flashcard_repo.create().
-
-recreate_flashcard() and suggest_answer() still access the DB directly because
-they are UI-driven (Mentor Review) and will be decoupled in Phase 3.
+Do Not:
+- Score, grade, or critique the cards it generates (that is CriticAgent's job).
+- Filter or decide whether a chunk is relevant to a topic (RelevanceAgent).
+- Assign or infer topic/subtopic labels (TopicAssignerAgent).
+- Produce HTML markup, inline styles, or display-layer formatting in any output field.
+- Append evaluation commentary ("Critic Feedback:", scores, grading notes) to answers.
+- Write generated cards to the database; return drafts and let the workflow persist them.
 """
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Any as AnyType
 from langchain_core.prompts import ChatPromptTemplate
@@ -24,6 +26,36 @@ from core.database import SessionLocal, Flashcard, ContentChunk
 from core.config import settings
 
 logger = logging.getLogger(__name__)
+
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
+_CRITIC_MARKER_RE = re.compile(r'Critic\s+Feedback\s*:', re.IGNORECASE)
+
+
+def _is_clean(text: str) -> bool:
+    """Return True if text contains no HTML markup or critic feedback commentary.
+
+    Cards that fail this check have exceeded the SocraticAgent's SRP — the LLM
+    has bled display formatting or evaluation output into a generation field.
+    They should be rejected and regenerated, never silently fixed.
+    """
+    return not _HTML_TAG_RE.search(text) and not _CRITIC_MARKER_RE.search(text)
+
+
+def _violation_reasons(cards: list) -> str:
+    """Summarise exactly what rule was violated across a list of FlashcardItem objects.
+
+    Used to give the LLM precise feedback on its retry turn.
+    """
+    reasons = []
+    for i, card in enumerate(cards, 1):
+        for field, text in (("question", card.question), ("answer", card.answer)):
+            if _HTML_TAG_RE.search(text):
+                tag = _HTML_TAG_RE.search(text).group(0)
+                reasons.append(f"Card {i} {field}: contains HTML markup (e.g. `{tag}`)")
+            if _CRITIC_MARKER_RE.search(text):
+                reasons.append(f"Card {i} {field}: contains 'Critic Feedback:' commentary")
+    return "\n".join(reasons) if reasons else "unknown violation"
+
 
 # ---------------------------------------------------------------------------
 # Output models (Pydantic — used for LLM structured output)
@@ -72,7 +104,13 @@ CRITICAL GUIDELINES:
 3. If the text lacks significant testable content, return an empty list.
 4. For each flashcard include EXACTLY 3 rubric criteria.
 5. Cite the specific part of the source that supports the answer in the rubric.
-6. suggested_complexity — Bloom's Taxonomy / CBSE HOTS:
+6. OUTPUT FORMAT — ABSOLUTE RULES:
+   The `question` and `answer` fields MUST contain ONLY plain text or Markdown.
+   NEVER include: HTML tags, XML tags, inline styles, <hr>, <p>, <strong>, or any other markup.
+   NEVER include: critic scores, grading feedback, "Critic Feedback:", or self-evaluation commentary.
+   NEVER include: section labels like "Answer:" or "Question:" as prefixes inside these fields.
+   Violation of these rules will cause the card to be discarded.
+7. suggested_complexity — Bloom's Taxonomy / CBSE HOTS:
    simple  = answer is a single fact directly quotable from one sentence in the source (Remember/Understand).
              Action verbs: Define, List, State, Identify, Summarize.
    medium  = requires applying a concept, multi-step reasoning, or comparing/contrasting ideas in the source (Apply/Analyse).
@@ -81,7 +119,7 @@ CRITICAL GUIDELINES:
              Action verbs: Justify, Criticise, Formulate, Design, Integrate.
              RULE: if the answer can be directly quoted from one passage → simple or medium, never complex.
              Default to medium when uncertain.
-7. SELF-CONTAINED RULE (applies to ALL question types):
+8. SELF-CONTAINED RULE (applies to ALL question types):
    The question text MUST include every piece of data the student needs to answer it.
    NEVER write phrases like "Using Table 1...", "From the figure...", "Based on the data above...",
    "Refer to the table...", "According to the graph..." unless the actual table/figure/data
@@ -224,8 +262,64 @@ class SocraticAgent:
         if not result.flashcards:
             return []
 
+        # Validate SRP compliance: reject cards whose question or answer contains
+        # HTML markup or critic commentary — these indicate the LLM exceeded its role.
+        valid = [c for c in result.flashcards if _is_clean(c.question) and _is_clean(c.answer)]
+        n_rejected = len(result.flashcards) - len(valid)
+        if n_rejected:
+            logger.warning(
+                "SocraticAgent: %d/%d card(s) violated SRP (HTML or critic content in output); "
+                "those cards were discarded.",
+                n_rejected, len(result.flashcards),
+            )
+
+        if not valid:
+            # All cards failed — retry once with corrective feedback so the LLM
+            # knows exactly what rule it broke and can stay the course.
+            reasons = _violation_reasons(result.flashcards)
+            logger.warning(
+                "SocraticAgent: all generated cards violated SRP, retrying with feedback.\n%s",
+                reasons,
+            )
+            try:
+                system_msg = PROMPTS.get(question_type, PROMPTS["active_recall"])
+                if question_type == "numerical":
+                    system_msg += "\n\n" + _get_novel_numerical_examples()
+                corrective_prompt = ChatPromptTemplate.from_messages([
+                    ("system", system_msg),
+                    ("user", "Topic: {topic}\nSubtopic: {subtopic}\n\nSource text:\n\n{text}"),
+                    ("assistant", "{rejected_output}"),
+                    ("user",
+                     "Your previous response was rejected. Violations found:\n{reasons}\n\n"
+                     "Regenerate the flashcards now, strictly following OUTPUT FORMAT rule #6."),
+                ])
+                retry_chain = corrective_prompt | self.llm.with_structured_output(FlashcardOutput)
+                retry_result = invoke_with_retry(
+                    retry_chain.invoke,
+                    {
+                        "text": source_text,
+                        "topic": topic,
+                        "subtopic": subtopic,
+                        "rejected_output": str([
+                            {"question": c.question[:200], "answer": c.answer[:200]}
+                            for c in result.flashcards
+                        ]),
+                        "reasons": reasons,
+                    },
+                    config=get_langchain_config(),
+                )
+                valid = [c for c in retry_result.flashcards if _is_clean(c.question) and _is_clean(c.answer)]
+                if not valid:
+                    logger.error(
+                        "SocraticAgent: cards still violated SRP after corrective retry; discarding all."
+                    )
+                    return []
+            except Exception as retry_err:
+                logger.error("SocraticAgent: SRP-retry failed: %s", retry_err)
+                return []
+
         drafts = []
-        for card in result.flashcards:
+        for card in valid:
             drafts.append(FlashcardDraft(
                 question=card.question,
                 answer=card.answer,

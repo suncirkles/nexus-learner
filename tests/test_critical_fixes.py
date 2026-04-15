@@ -168,29 +168,28 @@ def test_flashcards_have_subject_id_after_generation(generated_cards):
 
 
 # ---------------------------------------------------------------------------
-# C18 — _flush_qdrant_batch propagates Qdrant errors clearly
+# C18 — _flush_vector_batch propagates vector store errors clearly
 # ---------------------------------------------------------------------------
 
-def test_flush_qdrant_batch_raises_on_failure(monkeypatch):
-    """_flush_qdrant_batch must raise (not silently swallow) Qdrant errors."""
+def test_flush_vector_batch_raises_on_failure(monkeypatch):
+    """_flush_vector_batch must raise (not silently swallow) vector store errors."""
     from workflows import phase1_ingestion
-    import langchain_qdrant
+    from unittest.mock import MagicMock
 
-    def _boom(*args, **kwargs):
-        raise ConnectionError("Qdrant is down")
-
-    monkeypatch.setattr(langchain_qdrant.QdrantVectorStore, "from_documents", staticmethod(_boom))
+    mock_store = MagicMock()
+    mock_store.upsert_chunks.side_effect = ConnectionError("Vector store is down")
+    monkeypatch.setattr("repositories.vector.factory.get_vector_store", lambda: mock_store)
 
     pending = [{"text": "hello", "metadata": {"document_id": "x", "db_chunk_id": 1}}]
-    with pytest.raises(ConnectionError, match="Qdrant is down"):
-        phase1_ingestion._flush_qdrant_batch(pending)
+    with pytest.raises(ConnectionError, match="Vector store is down"):
+        phase1_ingestion._flush_vector_batch(pending)
 
 
-def test_flush_qdrant_batch_noop_on_empty():
-    """_flush_qdrant_batch with empty list must not call Qdrant at all."""
-    from workflows.phase1_ingestion import _flush_qdrant_batch
-    # Should complete without error even if Qdrant is unavailable
-    _flush_qdrant_batch([])
+def test_flush_vector_batch_noop_on_empty():
+    """_flush_vector_batch with empty list must not call the vector store at all."""
+    from workflows.phase1_ingestion import _flush_vector_batch
+    # Should complete without error even if the vector store is unavailable
+    _flush_vector_batch([])
 
 
 # ---------------------------------------------------------------------------
